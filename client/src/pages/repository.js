@@ -3,11 +3,15 @@ import { navigate, showToast } from "../main.js";
 
 const FILTERS = ["All", "Government", "University", "Corporate", "International", "Ngo"];
 
-let currentFilter = "All";
+let currentFilter = "all";
 let searchQuery = "";
 let searchTimeout = null;
 
 export async function renderRepository(el) {
+  currentFilter = "all";
+  searchQuery = "";
+  if (searchTimeout) clearTimeout(searchTimeout);
+
   el.innerHTML = `
     <div class="page">
       <div class="container section">
@@ -51,7 +55,7 @@ export async function renderRepository(el) {
 
           <div class="flex gap-8" id="repo-filters">
             ${FILTERS.map(f => `
-              <button class="filter-chip ${f === currentFilter ? "active" : ""}" data-filter="${f.toLowerCase()}">${f}</button>
+              <button class="filter-chip ${f.toLowerCase() === currentFilter.toLowerCase() ? "active" : ""}" data-filter="${f.toLowerCase()}">${f}</button>
             `).join("")}
           </div>
         </div>

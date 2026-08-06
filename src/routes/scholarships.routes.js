@@ -49,6 +49,8 @@ router.post("/scrape-url", optionalAuth, async (req, res) => {
     console.error("Scrape URL endpoint error:", err);
     res.status(500).json({ success: false, message: err.message || "Failed to scrape URL" });
   }
+});
+
 // POST /api/repository/add — Add one or multiple scholarships manually via JSON payload
 router.post("/add", optionalAuth, async (req, res) => {
   try {
@@ -99,7 +101,7 @@ router.get("/", optionalAuth, async (req, res) => {
 
     const query = {};
 
-    if (filter !== "all") query.provider_type = filter;
+    if (filter && filter.toLowerCase() !== "all") query.provider_type = filter.toLowerCase();
     if (education_level) query.$or = [{ education_level }, { education_level: "any" }];
     if (country) query.country = country;
     if (field_of_study) query.field_of_study = { $in: [field_of_study, "All"] };
@@ -181,43 +183,6 @@ router.get("/search", optionalAuth, async (req, res) => {
   }
 });
 
-// GET /api/repository/:id — single scholarship
-router.get("/:id", optionalAuth, async (req, res) => {
-  try {
-    const scholarship = await Scholarship.findById(req.params.id).lean();
-    if (!scholarship) return res.status(404).json({ success: false, message: "Scholarship not found." });
-
-    let eligibilityData = null;
-    if (req.user) {
-      eligibilityData = engine.checkEligibility(
-        req.user.toObject ? req.user.toObject() : req.user,
-        scholarship
-      );
-    }
-
-    const deadlineDate = scholarship.deadline ? new Date(scholarship.deadline) : null;
-    const checklist = (scholarship.required_documents || []).map((doc, i) => {
-      let dueDate = null;
-      if (deadlineDate && !isNaN(deadlineDate)) {
-        const daysBefore = Math.max(7, 14 - i * 2);
-        dueDate = new Date(deadlineDate);
-        dueDate.setDate(dueDate.getDate() - daysBefore);
-        dueDate = dueDate.toISOString().split("T")[0];
-      }
-      return { document: doc, due_by: dueDate, status: "pending" };
-    });
-
-    res.json({
-      success: true,
-      scholarship,
-      eligibility: eligibilityData,
-      application_checklist: checklist,
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
 // GET /api/repository/matched/me — user's matched scholarships
 router.get("/matched/me", protect, async (req, res) => {
   try {
@@ -258,6 +223,43 @@ router.get("/matched/me", protect, async (req, res) => {
           roi_rank: m.roi_rank,
           blockers: m.blockers_reasons,
         })),
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// GET /api/repository/:id — single scholarship
+router.get("/:id", optionalAuth, async (req, res) => {
+  try {
+    const scholarship = await Scholarship.findById(req.params.id).lean();
+    if (!scholarship) return res.status(404).json({ success: false, message: "Scholarship not found." });
+
+    let eligibilityData = null;
+    if (req.user) {
+      eligibilityData = engine.checkEligibility(
+        req.user.toObject ? req.user.toObject() : req.user,
+        scholarship
+      );
+    }
+
+    const deadlineDate = scholarship.deadline ? new Date(scholarship.deadline) : null;
+    const checklist = (scholarship.required_documents || []).map((doc, i) => {
+      let dueDate = null;
+      if (deadlineDate && !isNaN(deadlineDate)) {
+        const daysBefore = Math.max(7, 14 - i * 2);
+        dueDate = new Date(deadlineDate);
+        dueDate.setDate(dueDate.getDate() - daysBefore);
+        dueDate = dueDate.toISOString().split("T")[0];
+      }
+      return { document: doc, due_by: dueDate, status: "pending" };
+    });
+
+    res.json({
+      success: true,
+      scholarship,
+      eligibility: eligibilityData,
+      application_checklist: checklist,
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
