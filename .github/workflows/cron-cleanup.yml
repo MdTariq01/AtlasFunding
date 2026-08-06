@@ -1,0 +1,27 @@
+name: Cron Cleanup
+
+# Removes expired/stale scholarships by POSTing to the secured /api/cron/trigger.
+#
+# Schedule: every 2 days at 01:00 IST (19:30 UTC) — 1 hour after the scraper,
+# so freshly-added schemes aren't deleted by the cleanup pass.
+# Requires the CRON_SECRET repository secret (must match the server's env).
+
+on:
+  schedule:
+    - cron: "30 19 */2 * *"
+  workflow_dispatch: {}
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger scholarship cleanup
+        env:
+          API_URL: ${{ vars.API_BASE_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          URL="${API_URL:-https://atlasfunding.onrender.com}"
+          curl -fsS -X POST \
+            -H "Content-Type: application/json" \
+            -H "x-cron-secret: ${CRON_SECRET}" \
+            "${URL}/api/cron/trigger?job=cleanup"

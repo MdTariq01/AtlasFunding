@@ -26,7 +26,7 @@ const DEFAULT_SOURCES = [
   { url: "https://www.scholarships.net.in/", name: "Scholarships Net India" }
 ];
 
-// ── 35+ Categorized Search Queries covering all fields, states & degrees ──────
+// ── 75+ Categorized Search Queries covering fields, states & degrees ──────────
 const SEARCH_QUERY_POOL = [
   // General & National Portals
   "latest scholarship application 2026 apply online India",
@@ -71,7 +71,58 @@ const SEARCH_QUERY_POOL = [
   "Mahadbt Maharashtra SSP Karnataka Oasis WB scholarship 2026",
   "e-Kalyan Bihar Jharkhand Digital Gujarat MPTAAS MP scholarship 2026",
   "Tamil Nadu Pudhumai Penn Kerala scholarship 2026",
-  "UP scholarship postmatric portal scholarship.up.gov.in 2026"
+  "UP scholarship postmatric portal scholarship.up.gov.in 2026",
+
+  // ── More State Portals ──────────────────────────────────────────────
+  "Odisha post matric scholarship OSAP application 2026",
+  "Rajasthan SJE post matric scholarship scheme 2026",
+  "Gujarat government post matric scholarship 2026",
+  "Punjab education scholarship scheme merit 2026",
+  "Haryana post matric scholarship apply online 2026",
+  "Kerala scholarship LBS centre state scheme 2026",
+  "Telangana welfare scholarship post matric 2026",
+  "Assam government scholarship scheme 2026",
+  "Chhattisgarh scholarship pre matric post matric 2026",
+  "Andhra Pradesh AP scholarship online apply 2026",
+  "Himachal Pradesh merit scholarship scheme 2026",
+  "Uttarakhand scholarship scheme government 2026",
+  "Jammu Kashmir scholarship scheme students 2026",
+  "Goa Manipur Meghalaya Mizoram scholarship scheme 2026",
+
+  // ── More Disciplines & Fields ───────────────────────────────────────
+  "dentistry BDS MDS scholarship 2026 India apply online",
+  "veterinary BVSc animal husbandry scholarship India 2026",
+  "pharmacy BPharm DPharm scholarship 2026 India",
+  "nursing GNM BSc nursing scholarship India 2026",
+  "physiotherapy occupational therapy scholarship 2026",
+  "journalism mass communication media studies scholarship 2026 India",
+  "sports quota student athlete education scholarship India 2026",
+  "teacher training B.Ed D.El.Ed scholarship 2026 India",
+  "hotel management hospitality tourism scholarship India 2026",
+  "fashion design textile design scholarship India 2026",
+  "music performing arts fine arts scholarship India 2026",
+
+  // ── More Demographics & Social Categories ───────────────────────────
+  "transgender TG community education scholarship India 2026",
+  "tribal student ST scholarship pre matric post matric 2026",
+  "minority community education scholarship India 2026",
+  "first generation learner education scholarship India 2026",
+  "EWS economically weaker section scholarship 2026 India",
+  "war widow defence dependent education scholarship India",
+  "farmer family student scholarship scheme India 2026",
+
+  // ── International & Research ────────────────────────────────────────
+  "Erasmus Mundus scholarship for Indian students 2026 2027",
+  "New Zealand Ireland study scholarship Indian students 2026",
+  "UGC NET JRF research fellowship 2026 India",
+  "ISRO IISc research fellowship scholarship 2026",
+  "Atal innovation mission scholarship fellowship 2026",
+  "Oxford Cambridge Harvard fully funded scholarship Indian student 2026",
+
+  // ── Corporate & CSR ─────────────────────────────────────────────────
+  "ICICI Foundation LIC HDFC Bank education scholarship 2026",
+  "Birla SBI ONGC NTPC CSR education scholarship 2026",
+  "Mahindra YES Bank engineering scholarship 2026 India"
 ];
 
 // ── VALID ENUM VALUES (must exactly match Scholarship.js model) ─────────────────
@@ -276,18 +327,51 @@ function firecrawlScrape(url) {
 
 const IS_BAD_URL = (u) => /youtube\.com|youtu\.be|facebook\.com|instagram\.com|twitter\.com|x\.com|tiktok\.com/i.test(u);
 
-async function discoverNewScholarshipSites(targetLimit = 30) {
+// Domains that mostly re-list links rather than host extractable scholarship
+// detail — skip them when discovered (buddy4study stays a default source).
+const LOW_VALUE_DOMAINS = new Set([
+  "buddy4study.com", "scholarships.net.in", "getmyuni.com",
+  "scholars4dev.com", "youthop.com", "sarkariresult.com",
+  "collegedunia.com", "shiksha.com", "careers360.com", "edufever.com",
+]);
+
+function hostnameOf(url) {
+  try { return new URL(url).hostname.replace(/^www\./, "").toLowerCase(); }
+  catch { return ""; }
+}
+
+// Skip generic job/result aggregators that don't hold scholarship detail.
+function isLowValueUrl(url) {
+  const h = hostnameOf(url);
+  return LOW_VALUE_DOMAINS.has(h) || /(sarkari|recruitment|admit-card|job-)/i.test(h);
+}
+
+// Prefer official/academic sources when ranking discovered pages.
+function sourceValue(url) {
+  const h = hostnameOf(url);
+  let score = 0;
+  if (/\.gov\.in$|\.ac\.in$|\.nic\.in$/.test(h)) score += 3; // official portals
+  if (/\.edu$|\.org$/.test(h)) score += 2;                    // universities / NGOs
+  if (/(scholarship|grant|fellowship|foundation|trust)/i.test(h)) score += 1;
+  return score;
+}
+
+async function discoverNewScholarshipSites(targetLimit = 100) {
   if (!FIRECRAWL_KEY) {
     console.log("  ⚠️  FIRECRAWL_API_KEY not set — skipping site discovery.");
     return [];
   }
 
+  // Guard against absurd values passed via --limit.
+  const limit = Math.min(200, Math.max(1, targetLimit || 100));
+
   // Shuffle search query pool so subsequent runs search DIFFERENT topics and find new results
   const shuffledQueries = [...SEARCH_QUERY_POOL].sort(() => 0.5 - Math.random());
-  // Pick queries based on target limit
-  const numQueriesToUse = Math.min(8, shuffledQueries.length);
+  // Spread across more queries for better category coverage, pulling enough
+  // results per query so the total approaches ~limit unique pages.
+  const numQueriesToUse = Math.min(25, shuffledQueries.length);
   const selectedQueries = shuffledQueries.slice(0, numQueriesToUse);
-  const itemsPerQuery = Math.max(3, Math.ceil(targetLimit / numQueriesToUse));
+  const itemsPerQuery = Math.max(4, Math.ceil(limit / numQueriesToUse));
 
   console.log(`🔍 Discovering new scholarship pages using ${selectedQueries.length} randomized search queries (~${itemsPerQuery} links each)...`);
 
@@ -321,7 +405,7 @@ async function discoverNewScholarshipSites(targetLimit = 30) {
 
       if (result.data && Array.isArray(result.data)) {
         result.data.forEach(item => {
-          if (item.url && !seenUrls.has(item.url) && !IS_BAD_URL(item.url)) {
+          if (item.url && !seenUrls.has(item.url) && !IS_BAD_URL(item.url) && !isLowValueUrl(item.url)) {
             seenUrls.add(item.url);
             discovered.push({ url: item.url, name: item.title || item.url });
           }
@@ -331,6 +415,9 @@ async function discoverNewScholarshipSites(targetLimit = 30) {
       console.warn(`  ⚠️  Search query failed ("${query}"):`, err.message);
     }
   }
+
+  // Process official/academic sources first, then lower-value ones.
+  discovered.sort((a, b) => sourceValue(b.url) - sourceValue(a.url));
 
   console.log(`🌐 Site Discovery: found ${discovered.length} unique potential pages.\n`);
   return discovered;
@@ -367,7 +454,7 @@ async function processSource(source) {
   return true;
 }
 
-async function runScraper(manualUrl = null, targetLimit = 30) {
+async function runScraper(manualUrl = null, targetLimit = 100) {
   await connectDB();
   console.log("\n🕷️  AtlasFunding — Scholarship Scraping Pipeline\n" + "─".repeat(52));
 
@@ -410,7 +497,7 @@ if (require.main === module) {
   const manualUrl = urlFlagIndex !== -1 ? process.argv[urlFlagIndex + 1] : null;
 
   const limitFlagIndex = process.argv.indexOf("--limit");
-  const targetLimit = limitFlagIndex !== -1 ? parseInt(process.argv[limitFlagIndex + 1]) || 30 : 30;
+  const targetLimit = limitFlagIndex !== -1 ? parseInt(process.argv[limitFlagIndex + 1]) || 100 : 100;
 
   runScraper(manualUrl, targetLimit)
     .then(() => process.exit(0))

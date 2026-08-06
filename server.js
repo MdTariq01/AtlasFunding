@@ -3,7 +3,7 @@ const express = require("express");
 const cors    = require("cors");
 const morgan  = require("morgan");
 const path    = require("path");
-const cron    = require("node-cron");
+const crypto  = require("crypto");
 
 const connectDB    = require("./src/db/connection");
 const { runScraper }  = require("./scripts/scrape");
@@ -45,14 +45,51 @@ app.get(["/", "/api/health"], (req, res) => {
   res.json({ status: "ok", service: "AtlasFunding API", timestamp: new Date().toISOString(), env: process.env.NODE_ENV });
 });
 
-// ── Manual Cron Trigger ─────────────────────────────────────────────────────────
+// ── Cron Trigger (external scheduler → this endpoint) ───────────────────────────
+// The scheduled scraper/cleanup jobs are invoked by GitHub Actions POSTing here.
+// Auth is header-only (x-cron-secret) against CRON_SECRET, plus a per-IP rate limit.
+
+function safeEqual(a, b) {
+  const ha = crypto.createHash("sha256").update(String(a || "")).digest();
+  const hb = crypto.createHash("sha256").update(String(b || "")).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+
+// Minimal in-memory fixed-window limiter (per-IP). Replaced by a proper
+// rate-limiting store when global rate limiting is added in a later pass.
+const cronLimitStore = new Map();
+function checkCronRateLimit(key, limit = 5, windowMs = 15 * 60 * 1000) {
+  const now = Date.now();
+  const rec = cronLimitStore.get(key) || { count: 0, resetAt: now + windowMs };
+  if (now > rec.resetAt) {
+    rec.count = 0;
+    rec.resetAt = now + windowMs;
+  }
+  rec.count += 1;
+  cronLimitStore.set(key, rec);
+  // Opportunistic cleanup so the map doesn't grow without bound
+  if (cronLimitStore.size > 1000) {
+    for (const [k, r] of cronLimitStore) if (r.resetAt < now) cronLimitStore.delete(k);
+  }
+  return rec.count <= limit;
+}
+
 // POST /api/cron/trigger?job=scraper|cleanup|both
-// Requires CRON_SECRET env var or logged-in user
 app.post("/api/cron/trigger", async (req, res) => {
-  // Simple secret-key auth — set CRON_SECRET in your Render env vars
-  const secret = req.headers["x-cron-secret"] || req.query.secret;
-  if (process.env.CRON_SECRET && secret !== process.env.CRON_SECRET) {
+  const secret = req.headers["x-cron-secret"];
+
+  if (!process.env.CRON_SECRET) {
+    if (process.env.NODE_ENV === "production") {
+      return res.status(500).json({ success: false, message: "CRON_SECRET is not configured on the server." });
+    }
+    // Dev: allow without a secret so local runs are easy
+  } else if (!secret || !safeEqual(secret, process.env.CRON_SECRET)) {
     return res.status(403).json({ success: false, message: "Invalid or missing CRON_SECRET." });
+  }
+
+  const ip = req.ip || req.socket?.remoteAddress || "unknown";
+  if (!checkCronRateLimit(ip)) {
+    return res.status(429).json({ success: false, message: "Too many cron trigger requests. Try again later." });
   }
 
   const job = (req.query.job || req.body?.job || "both").toLowerCase();
@@ -75,8 +112,8 @@ app.post("/api/cron/trigger", async (req, res) => {
 
     res.json({ success: true, message: `Cron job(s) '${job}' completed.`, results });
   } catch (err) {
-    console.error("❌ [MANUAL] Cron trigger error:", err.message);
-    res.status(500).json({ success: false, message: err.message });
+    console.error("❌ [MANUAL] Cron trigger error:", err.stack || err.message);
+    res.status(500).json({ success: false, message: "Cron job failed on the server." });
   }
 });
 
@@ -113,51 +150,9 @@ connectDB().then(async () => {
     console.log(`✅ Seeded ${seedData.length} scholarships.\n`);
   }
 
-  // ────────────────────────────────────────────────────────────────────────────
-  // CRON JOB 1 — Scrape & discover new scholarships every 2 days at 00:00 AM
-  // Schedule: "0 0 */2 * *"  →  At midnight, every 2nd day
-  // ────────────────────────────────────────────────────────────────────────────
-  cron.schedule("0 0 */2 * *", async () => {
-    console.log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    console.log("⏰ [CRON JOB 1] Scholarship Discovery & Scraping Pipeline");
-    console.log(`   🕐 Triggered at: ${new Date().toLocaleString("en-IN")}`);
-    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    try {
-      const added = await runScraper();
-      console.log(`✅ [CRON JOB 1] Done — ${added} new scholarship(s) added.\n`);
-    } catch (err) {
-      console.error("❌ [CRON JOB 1] Scraper error:", err.message, "\n");
-    }
-  }, { timezone: "Asia/Kolkata" });
-
-  // ────────────────────────────────────────────────────────────────────────────
-  // CRON JOB 2 — Remove expired scholarships every 2 days at 01:00 AM
-  // Schedule: "0 1 */2 * *"  →  At 1 AM, every 2nd day (1 hour after scraping)
-  //           Runs AFTER the scraper to avoid deleting freshly added schemes
-  // ────────────────────────────────────────────────────────────────────────────
-  cron.schedule("0 1 */2 * *", async () => {
-    console.log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    console.log("⏰ [CRON JOB 2] Expired Scholarship Cleanup");
-    console.log(`   🕐 Triggered at: ${new Date().toLocaleString("en-IN")}`);
-    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    try {
-      const { deleted, matchesDeleted } = await runCleanup();
-      console.log(`✅ [CRON JOB 2] Done — ${deleted} expired scholarship(s) removed, ${matchesDeleted} match record(s) cleaned.\n`);
-    } catch (err) {
-      console.error("❌ [CRON JOB 2] Cleanup error:", err.message, "\n");
-    }
-  }, { timezone: "Asia/Kolkata" });
-
-  // Log the full scheduler status on boot
-  console.log("\n┌─────────────────────────────────────────────────────┐");
-  console.log("│          ⏱  AUTOMATED SCHEDULER ACTIVE              │");
-  console.log("├─────────────────────────────────────────────────────┤");
-  console.log("│ CRON JOB 1 │ Discover + scrape new scholarships     │");
-  console.log("│            │ Every 2 days at 00:00 AM (IST)         │");
-  console.log("├─────────────────────────────────────────────────────┤");
-  console.log("│ CRON JOB 2 │ Remove expired scholarships            │");
-  console.log("│            │ Every 2 days at 01:00 AM (IST)         │");
-  console.log("└─────────────────────────────────────────────────────┘\n");
+  // NOTE: In-process scheduled scraping/cleanup (node-cron) has been removed.
+  // Runs are now triggered by the GitHub Actions workflows in .github/workflows/
+  // which POST to /api/cron/trigger?job=scraper|cleanup (see README for setup).
 
   app.listen(PORT, () => {
     console.log(`🚀 AtlasFunding API → http://localhost:${PORT}`);
