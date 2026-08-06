@@ -26,6 +26,27 @@ export async function renderDetail(el) {
     const content = document.getElementById("detail-content");
     content.classList.remove("hidden");
 
+    const applyUrl = sch.application_url || sch.source_url;
+    let displayAmount = sch.amount_string;
+    if (
+      !displayAmount ||
+      displayAmount === "₹0 per year" ||
+      displayAmount === "₹0" ||
+      displayAmount === "0" ||
+      displayAmount.toLowerCase() === "varies" ||
+      displayAmount.toLowerCase() === "amount tbd"
+    ) {
+      if (sch.cover_type === "full" || (sch.cover_details && /full|100%|tuition/i.test(sch.cover_details))) {
+        displayAmount = "Fully Funded";
+      } else if (sch.cover_type === "tuition_only") {
+        displayAmount = "Full Tuition Waiver";
+      } else if (sch.amount_value && sch.amount_value > 0) {
+        displayAmount = `₹${sch.amount_value.toLocaleString("en-IN")}/year`;
+      } else {
+        displayAmount = "Varies / Variable";
+      }
+    }
+
     content.innerHTML = `
       <button class="btn btn-ghost btn-sm mb-24" onclick="history.back()">← Back</button>
 
@@ -40,7 +61,7 @@ export async function renderDetail(el) {
         
         <div class="flex" style="gap: 24px; align-items: baseline;">
           <div>
-            <div style="font-size: 2.5rem; font-weight: 800; color: var(--primary); line-height: 1;">${sch.amount_string || "Amount varies"}</div>
+            <div style="font-size: 2.5rem; font-weight: 800; color: var(--primary); line-height: 1;">${displayAmount}</div>
             <div style="font-size: 0.75rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 8px;">${sch.cover_type === 'full' ? 'FULL COVER' : 'PARTIAL COVER'}</div>
           </div>
           ${sch.deadline ? `
@@ -162,9 +183,9 @@ export async function renderDetail(el) {
 
       <!-- Actions -->
       <div class="flex gap-16">
-        ${sch.application_url ? `
-          <a href="${sch.application_url}" target="_blank" rel="noopener" class="btn btn-primary btn-lg">
-            Apply Now →
+        ${applyUrl ? `
+          <a href="${applyUrl}" target="_blank" rel="noopener" class="btn btn-primary btn-lg">
+            Apply Now ↗
           </a>
         ` : ""}
         ${isLoggedIn() ? `

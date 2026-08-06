@@ -158,6 +158,18 @@ function sanitizeScholarshipData(raw) {
   s.name     = s.name.trim().substring(0, 200);
   s.provider = s.provider ? String(s.provider).trim() : "Unknown";
 
+  if (!s.amount_string || s.amount_string === "₹0 per year" || s.amount_string === "₹0" || s.amount_string === "0" || s.amount_string.toLowerCase() === "varies") {
+    if (s.cover_type === "full") {
+      s.amount_string = "Fully Funded";
+    } else if (s.cover_type === "tuition_only") {
+      s.amount_string = "Full Tuition Waiver";
+    } else if (s.amount_value && s.amount_value > 0) {
+      s.amount_string = `₹${s.amount_value.toLocaleString("en-IN")}/year`;
+    } else {
+      s.amount_string = "Variable Award";
+    }
+  }
+
   return s;
 }
 

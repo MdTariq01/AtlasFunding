@@ -45,6 +45,41 @@ app.get(["/", "/api/health"], (req, res) => {
   res.json({ status: "ok", service: "AtlasFunding API", timestamp: new Date().toISOString(), env: process.env.NODE_ENV });
 });
 
+// ── Manual Cron Trigger ─────────────────────────────────────────────────────────
+// POST /api/cron/trigger?job=scraper|cleanup|both
+// Requires CRON_SECRET env var or logged-in user
+app.post("/api/cron/trigger", async (req, res) => {
+  // Simple secret-key auth — set CRON_SECRET in your Render env vars
+  const secret = req.headers["x-cron-secret"] || req.query.secret;
+  if (process.env.CRON_SECRET && secret !== process.env.CRON_SECRET) {
+    return res.status(403).json({ success: false, message: "Invalid or missing CRON_SECRET." });
+  }
+
+  const job = (req.query.job || req.body?.job || "both").toLowerCase();
+  const results = {};
+
+  try {
+    if (job === "scraper" || job === "both") {
+      console.log("🔧 [MANUAL] Running scraper...");
+      const added = await runScraper();
+      results.scraper = { ran: true, added };
+      console.log(`✅ [MANUAL] Scraper done — ${added} new scholarship(s).`);
+    }
+
+    if (job === "cleanup" || job === "both") {
+      console.log("🔧 [MANUAL] Running cleanup...");
+      const { deleted, matchesDeleted } = await runCleanup();
+      results.cleanup = { ran: true, deleted, matchesDeleted };
+      console.log(`✅ [MANUAL] Cleanup done — ${deleted} expired removed.`);
+    }
+
+    res.json({ success: true, message: `Cron job(s) '${job}' completed.`, results });
+  } catch (err) {
+    console.error("❌ [MANUAL] Cron trigger error:", err.message);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // ── Serve Vite build in production (if built in monorepo) ──────────────────────
 if (process.env.NODE_ENV === "production") {
   const fs = require("fs");

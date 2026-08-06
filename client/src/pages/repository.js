@@ -166,6 +166,28 @@ export function renderCards(items, container) {
     const matchScore = s.match_score !== undefined ? s.match_score : null;
     const winOdds = s.win_odds !== undefined ? s.win_odds : null;
 
+    let displayAmount = s.amount_string;
+    if (
+      !displayAmount ||
+      displayAmount === "₹0 per year" ||
+      displayAmount === "₹0" ||
+      displayAmount === "0" ||
+      displayAmount.toLowerCase() === "varies" ||
+      displayAmount.toLowerCase() === "amount tbd"
+    ) {
+      if (s.cover_type === "full" || (s.cover_details && /full|100%|tuition/i.test(s.cover_details))) {
+        displayAmount = "Fully Funded";
+      } else if (s.cover_type === "tuition_only") {
+        displayAmount = "Full Tuition Waiver";
+      } else if (s.amount_value && s.amount_value > 0) {
+        displayAmount = `₹${s.amount_value.toLocaleString("en-IN")}/year`;
+      } else {
+        displayAmount = "Varies / Variable";
+      }
+    }
+
+    const applyUrl = s.application_url || s.source_url;
+
     let blockedHTML = "";
     const blockers = s.blockedReasons || s.blockers || [];
     if (blockers.length) {
@@ -191,7 +213,7 @@ export function renderCards(items, container) {
         </div>
 
         <div style="margin-bottom: 20px;">
-          <div style="font-size: 1.5rem; font-weight: 800; color: var(--primary);">${s.amount_string || "Varies"}</div>
+          <div style="font-size: 1.5rem; font-weight: 800; color: var(--primary);">${displayAmount}</div>
           <div style="font-size: 0.85rem; color: var(--text-secondary); margin-top: 4px;">${s.cover_details || (s.cover_type + " funding")}</div>
         </div>
 
@@ -214,7 +236,7 @@ export function renderCards(items, container) {
 
         <div class="flex gap-8 mt-16" style="justify-content: flex-end;">
           <a href="#/detail?id=${s._id}" class="btn btn-ghost btn-sm">Details →</a>
-          ${s.application_url ? `<a href="${s.application_url}" target="_blank" rel="noopener" class="btn btn-primary btn-sm">Apply</a>` : ""}
+          ${applyUrl ? `<a href="${applyUrl}" target="_blank" rel="noopener" class="btn btn-primary btn-sm">Apply ↗</a>` : `<a href="#/detail?id=${s._id}" class="btn btn-primary btn-sm">Apply</a>`}
         </div>
       </div>
     `;
