@@ -13,20 +13,17 @@ const app  = express();
 const PORT = process.env.PORT || 3001;
 
 // ── Middleware ──────────────────────────────────────────────────────────────────
-const allowedOrigins = [
-  process.env.CLIENT_URL,
-  "http://localhost:5173",
-  "http://localhost:5174",
-  "http://localhost:3000",
-].filter(Boolean);
-
 app.use(cors({
   origin: function (origin, callback) {
     if (!origin) return callback(null, true);
-    const isAllowed =
-      allowedOrigins.some(o => origin.startsWith(o.replace(/\/$/, ""))) ||
-      /\.vercel\.app$/.test(origin);
-    if (isAllowed) return callback(null, true);
+    const clientUrl = (process.env.CLIENT_URL || "").replace(/\/$/, "");
+    if (
+      origin === clientUrl ||
+      /\.vercel\.app$/.test(origin) ||
+      origin.includes("localhost")
+    ) {
+      return callback(null, true);
+    }
     return callback(null, true);
   },
   credentials: true,
