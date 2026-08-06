@@ -19,8 +19,27 @@ const GROQ_KEY = process.env.GROQ_API_KEY;
 // ── Default sources to always scrape ───────────────────────────────────────────
 const DEFAULT_SOURCES = [
   { url: "https://www.buddy4study.com/scholarships", name: "Buddy4Study" },
-  { url: "https://www.scholarships.gov.in/", name: "NSP India" },
+  { url: "https://www.scholarships.gov.in/", name: "NSP India Portal" },
   { url: "https://newstrides.co/new/uk-delhi/", name: "NewStrides UK Grants" },
+  { url: "https://education.gov.in/scholarships", name: "Ministry of Education India" },
+  { url: "https://www.tatatrusts.org/our-work/individual-grants-programme/education-grants", name: "Tata Trusts Grants" },
+  { url: "https://www.scholarships.net.in/", name: "Scholarships Net India" }
+];
+
+// ── Broad pool of search queries to cover diverse categories ──────────────────
+const SEARCH_QUERY_POOL = [
+  "latest scholarship application 2026 apply online India",
+  "study abroad scholarship for Indian students 2026 UK USA Canada",
+  "state government merit scholarship scheme 2026 India",
+  "engineering undergraduate scholarship 2026 apply online",
+  "medical MBBS student scholarship scheme 2026 India",
+  "girl child women scholarship scheme 2026 India",
+  "corporate CSR foundation education scholarship 2026 India",
+  "SC ST OBC minority scholarship application 2026 portal",
+  "class 10th 12th passed student merit scholarship 2026",
+  "higher education grant deadline 2026 site:.gov.in OR site:.org.in",
+  "postgraduate masters scholarship abroad fully funded 2026",
+  "private trust charitable scholarship application 2026 India"
 ];
 
 // ── VALID ENUM VALUES (must exactly match Scholarship.js model) ─────────────────
@@ -205,26 +224,28 @@ function firecrawlScrape(url) {
   });
 }
 
-async function discoverNewScholarshipSites() {
+async function discoverNewScholarshipSites(targetLimit = 30) {
   if (!FIRECRAWL_KEY) {
     console.log("  ⚠️  FIRECRAWL_API_KEY not set — skipping site discovery.");
     return [];
   }
 
-  const queries = [
-    "latest scholarship application 2026 apply online India",
-    "study abroad scholarship for Indian students 2026",
-    "state government merit scholarship scheme 2026",
-    "new scholarship deadline 2026 india site:.gov.in OR site:.org.in",
-  ];
+  // Shuffle search query pool so subsequent runs search DIFFERENT topics and find new results
+  const shuffledQueries = [...SEARCH_QUERY_POOL].sort(() => 0.5 - Math.random());
+  // Pick queries based on target limit
+  const numQueriesToUse = Math.min(6, shuffledQueries.length);
+  const selectedQueries = shuffledQueries.slice(0, numQueriesToUse);
+  const itemsPerQuery = Math.max(3, Math.ceil(targetLimit / numQueriesToUse));
 
-  console.log("🔍 Discovering new scholarship web pages via search...");
+  console.log(`🔍 Discovering new scholarship pages using ${selectedQueries.length} randomized search queries (~${itemsPerQuery} links each)...`);
+
   const discovered = [];
+  const seenUrls = new Set();
 
-  for (const query of queries) {
+  for (const query of selectedQueries) {
     try {
       const result = await new Promise((resolve, reject) => {
-        const body = JSON.stringify({ query, limit: 3 });
+        const body = JSON.stringify({ query, limit: itemsPerQuery });
         const req = https.request({
           hostname: "api.firecrawl.dev",
           path: "/v1/search",
@@ -248,15 +269,18 @@ async function discoverNewScholarshipSites() {
 
       if (result.data && Array.isArray(result.data)) {
         result.data.forEach(item => {
-          if (item.url) discovered.push({ url: item.url, name: item.title || item.url });
+          if (item.url && !seenUrls.has(item.url)) {
+            seenUrls.add(item.url);
+            discovered.push({ url: item.url, name: item.title || item.url });
+          }
         });
       }
     } catch (err) {
-      console.warn(`  ⚠️  Search query failed: "${query}":`, err.message);
+      console.warn(`  ⚠️  Search query failed ("${query}"):`, err.message);
     }
   }
 
-  console.log(`🌐 Site Discovery: found ${discovered.length} potential new pages.\n`);
+  console.log(`🌐 Site Discovery: found ${discovered.length} unique potential pages.\n`);
   return discovered;
 }
 
@@ -278,7 +302,9 @@ async function processSource(source) {
   data.source_url = source.url;
   data.verified   = true;
 
-  const existing = await Scholarship.findOne({ name: data.name });
+  const existing = await Scholarship.findOne({
+    $or: [{ name: data.name }, { source_url: source.url }]
+  });
   if (existing) {
     console.log(`  ⏭  Already in database: "${data.name}"`);
     return false;
@@ -289,7 +315,7 @@ async function processSource(source) {
   return true;
 }
 
-async function runScraper(manualUrl = null) {
+async function runScraper(manualUrl = null, targetLimit = 30) {
   await connectDB();
   console.log("\n🕷️  AtlasFunding — Scholarship Scraping Pipeline\n" + "─".repeat(52));
 
@@ -305,7 +331,7 @@ async function runScraper(manualUrl = null) {
       console.error(`  ❌ Failed: ${err.message}`);
     }
   } else {
-    const discovered = await discoverNewScholarshipSites();
+    const discovered = await discoverNewScholarshipSites(targetLimit);
     const allSources = [...DEFAULT_SOURCES, ...discovered];
     console.log(`📋 Processing ${allSources.length} sources (${DEFAULT_SOURCES.length} default + ${discovered.length} discovered)\n`);
 
@@ -331,7 +357,10 @@ if (require.main === module) {
   const urlFlagIndex = process.argv.indexOf("--url");
   const manualUrl = urlFlagIndex !== -1 ? process.argv[urlFlagIndex + 1] : null;
 
-  runScraper(manualUrl)
+  const limitFlagIndex = process.argv.indexOf("--limit");
+  const targetLimit = limitFlagIndex !== -1 ? parseInt(process.argv[limitFlagIndex + 1]) || 30 : 30;
+
+  runScraper(manualUrl, targetLimit)
     .then(() => process.exit(0))
     .catch(err => {
       console.error("Scraper crashed:", err);
@@ -340,3 +369,4 @@ if (require.main === module) {
 }
 
 module.exports = { runScraper, processSource };
+
