@@ -21,11 +21,13 @@ export function clearAuth() {
 }
 
 // ── Base fetch wrapper ─────────────────────────────────────────────────────────
+const API_BASE = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
+
 async function request(path, options = {}) {
   const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
   if (_token) headers["Authorization"] = `Bearer ${_token}`;
 
-  const res = await fetch(`/api${path}`, { ...options, headers });
+  const res = await fetch(`${API_BASE}/api${path}`, { ...options, headers });
 
   let data = {};
   try {
@@ -87,8 +89,8 @@ export const api = {
   },
 
   advisor: {
-    ask: (question) =>
-      request("/advisor/ask", { method: "POST", body: JSON.stringify({ question }) }),
+    ask: (question, messages = []) =>
+      request("/advisor/ask", { method: "POST", body: JSON.stringify({ question, messages }) }),
     prompts: () => request("/advisor/prompts"),
   },
 

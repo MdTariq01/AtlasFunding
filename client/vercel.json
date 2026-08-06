@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://atlasfunding.onrender.com/api/:path*"
+    }
+  ]
+}

@@ -13,12 +13,22 @@ const app  = express();
 const PORT = process.env.PORT || 3001;
 
 // ── Middleware ──────────────────────────────────────────────────────────────────
+const allowedOrigins = [
+  process.env.CLIENT_URL,
+  "http://localhost:5173",
+  "http://localhost:5174",
+  "http://localhost:3000",
+].filter(Boolean);
+
 app.use(cors({
-  origin: [
-    process.env.CLIENT_URL || "http://localhost:5173",
-    "http://localhost:5174",
-    "http://localhost:3000",
-  ],
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true);
+    const isAllowed =
+      allowedOrigins.some(o => origin.startsWith(o.replace(/\/$/, ""))) ||
+      /\.vercel\.app$/.test(origin);
+    if (isAllowed) return callback(null, true);
+    return callback(null, true);
+  },
   credentials: true,
 }));
 app.use(express.json({ limit: "10mb" }));
@@ -33,16 +43,19 @@ app.use("/api/roadmap",     require("./src/routes/roadmap.routes"));
 app.use("/api/advisor",     require("./src/routes/advisor.routes"));
 app.use("/api/dashboard",   require("./src/routes/dashboard.routes"));
 
-// ── Health check ────────────────────────────────────────────────────────────────
-app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", timestamp: new Date().toISOString(), env: process.env.NODE_ENV });
+// ── Health & Root check ─────────────────────────────────────────────────────────
+app.get(["/", "/api/health"], (req, res) => {
+  res.json({ status: "ok", service: "AtlasFunding API", timestamp: new Date().toISOString(), env: process.env.NODE_ENV });
 });
 
-// ── Serve Vite build in production ─────────────────────────────────────────────
+// ── Serve Vite build in production (if built in monorepo) ──────────────────────
 if (process.env.NODE_ENV === "production") {
+  const fs = require("fs");
   const clientDist = path.join(__dirname, "client", "dist");
-  app.use(express.static(clientDist));
-  app.get("/{*splat}", (req, res) => res.sendFile(path.join(clientDist, "index.html")));
+  if (fs.existsSync(path.join(clientDist, "index.html"))) {
+    app.use(express.static(clientDist));
+    app.get("/{*splat}", (req, res) => res.sendFile(path.join(clientDist, "index.html")));
+  }
 }
 
 // ── Error handler ───────────────────────────────────────────────────────────────

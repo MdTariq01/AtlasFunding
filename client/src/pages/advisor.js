@@ -148,22 +148,8 @@ export async function renderAdvisor(el) {
     const thinking = addThinking();
 
     try {
-      const res = await fetch("/api/advisor/ask", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("af_token")}`,
-        },
-        body: JSON.stringify({
-          question: query,
-          messages: chatHistory,
-        }),
-      });
-
-      const data = await res.json();
+      const data = await api.advisor.ask(query, chatHistory);
       thinking.remove();
-
-      if (!res.ok) throw new Error(data.message || `API error ${res.status}`);
 
       let replyText = "";
       if (typeof data.reply === "string") {
