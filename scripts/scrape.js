@@ -26,20 +26,52 @@ const DEFAULT_SOURCES = [
   { url: "https://www.scholarships.net.in/", name: "Scholarships Net India" }
 ];
 
-// ── Broad pool of search queries to cover diverse categories ──────────────────
+// ── 35+ Categorized Search Queries covering all fields, states & degrees ──────
 const SEARCH_QUERY_POOL = [
+  // General & National Portals
   "latest scholarship application 2026 apply online India",
-  "study abroad scholarship for Indian students 2026 UK USA Canada",
+  "national scholarship portal NSP active schemes 2026 2027",
   "state government merit scholarship scheme 2026 India",
-  "engineering undergraduate scholarship 2026 apply online",
-  "medical MBBS student scholarship scheme 2026 India",
-  "girl child women scholarship scheme 2026 India",
+
+  // Disciplines & Fields
+  "engineering BTech B-E student scholarship 2026 apply online",
+  "medical MBBS BDS nursing student scholarship 2026 India",
+  "law LLB LLM student grant scholarship 2026 India",
+  "management MBA PGDM student scholarship financial aid 2026",
+  "pure science BSc MSc physics chemistry math KVPY INSPIRE scholarship 2026",
+  "agriculture BSc Agri veterinary dairy scholarship 2026 India",
+  "arts humanities fine arts design architecture scholarship 2026",
+
+  // Demographics & Social Categories
+  "girl child women single girl child scholarship 2026 India",
+  "SC ST OBC EWS minority student post matric scholarship 2026",
+  "disabled PwD divyangjan student scholarship application 2026",
+  "single parent orphan low income family scholarship 2026 India",
+  "defense personnel ex-servicemen police martyr child PMSS scholarship 2026",
+
+  // Corporate CSR & Top Foundations
   "corporate CSR foundation education scholarship 2026 India",
-  "SC ST OBC minority scholarship application 2026 portal",
+  "Tata trusts Reliance HDFC SBI LIC ONGC scholarship 2026",
+  "Kotak Kanya Aditya Birla Jindal Foundation scholarship 2026",
+  "Google Microsoft Amazon female tech coding fellowship 2026 India",
+
+  // Academic Levels
   "class 10th 12th passed student merit scholarship 2026",
-  "higher education grant deadline 2026 site:.gov.in OR site:.org.in",
-  "postgraduate masters scholarship abroad fully funded 2026",
-  "private trust charitable scholarship application 2026 India"
+  "undergraduate UG bachelor degree scholarship application 2026",
+  "postgraduate masters PG student scholarship fellowship 2026",
+  "PhD doctoral research fellowship CSIR UGC DST ICMR 2026",
+
+  // Study Abroad & Fellowships
+  "study abroad scholarship for Indian students 2026 UK USA Canada",
+  "Chevening Commonwealth Fulbright Rhodes scholarship 2026 2027",
+  "DAAD Germany Eiffel France MEXT Japan Australia Awards 2026",
+  "fully funded masters scholarship abroad for Indian students 2026",
+
+  // State Specific Portals
+  "Mahadbt Maharashtra SSP Karnataka Oasis WB scholarship 2026",
+  "e-Kalyan Bihar Jharkhand Digital Gujarat MPTAAS MP scholarship 2026",
+  "Tamil Nadu Pudhumai Penn Kerala scholarship 2026",
+  "UP scholarship postmatric portal scholarship.up.gov.in 2026"
 ];
 
 // ── VALID ENUM VALUES (must exactly match Scholarship.js model) ─────────────────
@@ -182,6 +214,7 @@ async function extractWithGroq(text) {
     model: "llama-3.1-8b-instant",
     max_tokens: 1000,
     temperature: 0,
+    response_format: { type: "json_object" },
     messages: [
       { role: "system", content: EXTRACTION_PROMPT },
       { role: "user", content: `Extract scholarship data from this page:\n\n${text.substring(0, 8000)}` },
@@ -189,11 +222,16 @@ async function extractWithGroq(text) {
   });
 
   const raw = completion.choices[0].message.content.trim();
-  const cleaned = raw.replace(/^```json?\s*/i, "").replace(/```\s*$/i, "").trim();
-  const match = cleaned.match(/\{[\s\S]*\}/);
-  if (!match) throw new Error("Groq did not return valid JSON");
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    const cleaned = raw.replace(/^```json?\s*/i, "").replace(/```\s*$/i, "").trim();
+    const match = cleaned.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error("Groq did not return valid JSON");
+    parsed = JSON.parse(match[0]);
+  }
 
-  const parsed = JSON.parse(match[0]);
   return sanitizeScholarshipData(parsed);
 }
 
@@ -224,6 +262,8 @@ function firecrawlScrape(url) {
   });
 }
 
+const IS_BAD_URL = (u) => /youtube\.com|youtu\.be|facebook\.com|instagram\.com|twitter\.com|x\.com|tiktok\.com/i.test(u);
+
 async function discoverNewScholarshipSites(targetLimit = 30) {
   if (!FIRECRAWL_KEY) {
     console.log("  ⚠️  FIRECRAWL_API_KEY not set — skipping site discovery.");
@@ -233,7 +273,7 @@ async function discoverNewScholarshipSites(targetLimit = 30) {
   // Shuffle search query pool so subsequent runs search DIFFERENT topics and find new results
   const shuffledQueries = [...SEARCH_QUERY_POOL].sort(() => 0.5 - Math.random());
   // Pick queries based on target limit
-  const numQueriesToUse = Math.min(6, shuffledQueries.length);
+  const numQueriesToUse = Math.min(8, shuffledQueries.length);
   const selectedQueries = shuffledQueries.slice(0, numQueriesToUse);
   const itemsPerQuery = Math.max(3, Math.ceil(targetLimit / numQueriesToUse));
 
@@ -269,7 +309,7 @@ async function discoverNewScholarshipSites(targetLimit = 30) {
 
       if (result.data && Array.isArray(result.data)) {
         result.data.forEach(item => {
-          if (item.url && !seenUrls.has(item.url)) {
+          if (item.url && !seenUrls.has(item.url) && !IS_BAD_URL(item.url)) {
             seenUrls.add(item.url);
             discovered.push({ url: item.url, name: item.title || item.url });
           }
