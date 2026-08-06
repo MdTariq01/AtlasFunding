@@ -8,6 +8,7 @@
     "server": "node server.js",
     "client": "cd client && npm run dev",
     "seed": "node scripts/seed.js",
+    "add": "node scripts/add.js",
     "scrape": "node scripts/scrape.js",
     "scrape:url": "node scripts/scrape.js --url",
     "cleanup": "node scripts/cleanup.js",

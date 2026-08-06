@@ -1,0 +1,34 @@
+[
+  {
+    "name": "Sample Scholarship 1",
+    "provider": "Sample Organization 1",
+    "amount_value": 50000,
+    "amount_currency": "INR",
+    "amount_string": "₹50,000/year",
+    "cover_type": "partial",
+    "education_level": "undergrad",
+    "field_of_study": ["Engineering", "All"],
+    "country": "India",
+    "study_location": "India",
+    "max_income_annual": 500000,
+    "min_gpa": 60,
+    "deadline": "2027-12-31",
+    "application_url": "https://example.com/apply"
+  },
+  {
+    "name": "Sample Scholarship 2",
+    "provider": "Sample Organization 2",
+    "amount_value": 100000,
+    "amount_currency": "INR",
+    "amount_string": "₹1,000,000/year",
+    "cover_type": "full",
+    "education_level": "postgrad",
+    "field_of_study": ["Science", "All"],
+    "country": "India",
+    "study_location": "Abroad",
+    "max_income_annual": 800000,
+    "min_gpa": 70,
+    "deadline": "2027-11-30",
+    "application_url": "https://example.com/apply2"
+  }
+]

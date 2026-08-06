@@ -49,6 +49,37 @@ router.post("/scrape-url", optionalAuth, async (req, res) => {
     console.error("Scrape URL endpoint error:", err);
     res.status(500).json({ success: false, message: err.message || "Failed to scrape URL" });
   }
+// POST /api/repository/add — Add one or multiple scholarships manually via JSON payload
+router.post("/add", optionalAuth, async (req, res) => {
+  try {
+    const items = Array.isArray(req.body) ? req.body : [req.body];
+    let created = 0;
+    let skipped = 0;
+    const addedList = [];
+
+    for (const item of items) {
+      if (!item.name) continue;
+      const existing = await Scholarship.findOne({ name: item.name });
+      if (existing) {
+        skipped++;
+        continue;
+      }
+      const newDoc = await Scholarship.create({ ...item, verified: true });
+      addedList.push(newDoc);
+      created++;
+    }
+
+    res.json({
+      success: true,
+      message: `Added ${created} scholarship(s) to database. (${skipped} skipped as duplicate)`,
+      created,
+      skipped,
+      scholarships: addedList,
+    });
+  } catch (err) {
+    console.error("Add scholarship error:", err);
+    res.status(500).json({ success: false, message: err.message });
+  }
 });
 
 // GET /api/repository — browse all scholarships
