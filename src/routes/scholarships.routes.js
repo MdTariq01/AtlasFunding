@@ -6,6 +6,7 @@ const Match = require("../models/Match");
 const EligibilityEngine = require("../engine/eligibility-engine");
 const ScholarshipSearchEngine = require("../engine/search-engine");
 const { protect, optionalAuth } = require("../middleware/auth");
+const { publicLimiter, authUserLimiter } = require("../config/rate-limit");
 
 const engine = new EligibilityEngine();
 
@@ -16,7 +17,7 @@ function getGroqClient() {
 }
 
 // POST /api/repository/scrape-url — Scrape and add any URL directly to running DB instance
-router.post("/scrape-url", optionalAuth, async (req, res) => {
+router.post("/scrape-url", authUserLimiter, optionalAuth, async (req, res) => {
   try {
     const { url } = req.body;
     if (!url || !url.startsWith("http")) {
@@ -52,7 +53,7 @@ router.post("/scrape-url", optionalAuth, async (req, res) => {
 });
 
 // POST /api/repository/add — Add one or multiple scholarships manually via JSON payload
-router.post("/add", optionalAuth, async (req, res) => {
+router.post("/add", authUserLimiter, optionalAuth, async (req, res) => {
   try {
     const items = Array.isArray(req.body) ? req.body : [req.body];
     let created = 0;
@@ -85,7 +86,7 @@ router.post("/add", optionalAuth, async (req, res) => {
 });
 
 // GET /api/repository — browse all scholarships
-router.get("/", optionalAuth, async (req, res) => {
+router.get("/", publicLimiter, optionalAuth, async (req, res) => {
   try {
     const {
       filter = "all",
@@ -154,7 +155,7 @@ router.get("/", optionalAuth, async (req, res) => {
 });
 
 // GET /api/repository/search — semantic search
-router.get("/search", optionalAuth, async (req, res) => {
+router.get("/search", publicLimiter, optionalAuth, async (req, res) => {
   try {
     const { q } = req.query;
     if (!q) return res.status(400).json({ success: false, message: "Query parameter 'q' is required." });
@@ -184,7 +185,7 @@ router.get("/search", optionalAuth, async (req, res) => {
 });
 
 // GET /api/repository/matched/me — user's matched scholarships
-router.get("/matched/me", protect, async (req, res) => {
+router.get("/matched/me", authUserLimiter, protect, async (req, res) => {
   try {
     const { eligible_only = "true", sort_by = "roi", page = 1, limit = 20 } = req.query;
 
@@ -230,7 +231,7 @@ router.get("/matched/me", protect, async (req, res) => {
 });
 
 // GET /api/repository/:id — single scholarship
-router.get("/:id", optionalAuth, async (req, res) => {
+router.get("/:id", publicLimiter, optionalAuth, async (req, res) => {
   try {
     const scholarship = await Scholarship.findById(req.params.id).lean();
     if (!scholarship) return res.status(404).json({ success: false, message: "Scholarship not found." });

@@ -3,6 +3,10 @@ const router = express.Router();
 const Match = require("../models/Match");
 const Scholarship = require("../models/Scholarship");
 const { protect } = require("../middleware/auth");
+const { authUserLimiter } = require("../config/rate-limit");
+
+// All dashboard endpoints require auth — apply the loose authenticated-user limiter.
+router.use(authUserLimiter);
 
 function daysUntil(dateStr) {
   if (!dateStr) return null;

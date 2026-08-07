@@ -3,9 +3,10 @@ const router = express.Router();
 const User = require("../models/User");
 const { signToken } = require("../middleware/auth");
 const { protect } = require("../middleware/auth");
+const { authLimiter, accountLimiter } = require("../config/rate-limit");
 
 // POST /api/auth/register
-router.post("/register", async (req, res) => {
+router.post("/register", authLimiter, accountLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
     if (!email || !password)
@@ -36,7 +37,7 @@ router.post("/register", async (req, res) => {
 });
 
 // POST /api/auth/login
-router.post("/login", async (req, res) => {
+router.post("/login", authLimiter, accountLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
     if (!email || !password)

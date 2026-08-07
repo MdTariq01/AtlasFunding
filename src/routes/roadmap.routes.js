@@ -4,6 +4,10 @@ const Match = require("../models/Match");
 const Timeline = require("../models/Timeline");
 const Scholarship = require("../models/Scholarship");
 const { protect } = require("../middleware/auth");
+const { authUserLimiter } = require("../config/rate-limit");
+
+// All roadmap endpoints require auth — apply the loose authenticated-user limiter.
+router.use(authUserLimiter);
 
 function daysUntil(dateStr) {
   if (!dateStr) return null;

@@ -3,6 +3,7 @@ const router = express.Router();
 const Match = require("../models/Match");
 const Scholarship = require("../models/Scholarship");
 const { protect } = require("../middleware/auth");
+const { publicLimiter, authUserLimiter } = require("../config/rate-limit");
 
 // Clear any old in-memory cache on reload
 const advisorCache = new Map();
@@ -18,7 +19,7 @@ function getGroqClient() {
 }
 
 // POST /api/advisor/ask
-router.post("/ask", protect, async (req, res) => {
+router.post("/ask", authUserLimiter, protect, async (req, res) => {
   try {
     const { question, messages = [] } = req.body;
     if (!question || question.trim().length < 2) {
@@ -158,7 +159,7 @@ function buildSmartFallback(question, user, topMatches, urgentDeadlines) {
   return `To get personalized recommendations, please complete the **Eligibility Calculator** first!`;
 }
 
-router.get("/prompts", protect, async (req, res) => {
+router.get("/prompts", publicLimiter, protect, async (req, res) => {
   res.json({
     success: true,
     prompts: [

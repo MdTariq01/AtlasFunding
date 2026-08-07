@@ -5,6 +5,7 @@ const Scholarship = require("../models/Scholarship");
 const Match = require("../models/Match");
 const EligibilityEngine = require("../engine/eligibility-engine");
 const { protect } = require("../middleware/auth");
+const { publicLimiter, authUserLimiter } = require("../config/rate-limit");
 
 const engine = new EligibilityEngine();
 
@@ -213,12 +214,12 @@ const QUESTIONS = [
 ];
 
 // GET /api/eligibility/questions
-router.get("/questions", (req, res) => {
+router.get("/questions", publicLimiter, (req, res) => {
   res.json({ success: true, total: QUESTIONS.length, questions: QUESTIONS });
 });
 
 // POST /api/eligibility/answer — save one answer
-router.post("/answer", protect, async (req, res) => {
+router.post("/answer", authUserLimiter, protect, async (req, res) => {
   try {
     const { question_num, answer } = req.body;
     if (!question_num || answer === undefined || answer === null)
@@ -253,7 +254,7 @@ router.post("/answer", protect, async (req, res) => {
 });
 
 // POST /api/eligibility/calculate — run full matching engine
-router.post("/calculate", protect, async (req, res) => {
+router.post("/calculate", authUserLimiter, protect, async (req, res) => {
   try {
     const userProfile = await User.findById(req.user._id);
     const scholarships = await Scholarship.find({});
