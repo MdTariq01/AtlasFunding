@@ -268,7 +268,7 @@ function sanitizeScholarshipData(raw) {
   // field ("Scholarship Name") or a generic fragment ("Undergraduate enrolment
   // tuition fee amount") instead of a real programme. These are not scholarships.
   const PLACEHOLDER_NAME_RE =
-    /^(scholarship\s*name|name\s*(of|for)?\s*(the\s*)?scholarship|scholarship|grant\s*name|n\/?a|na|tbd|to\s*be\s*decided|null|undefined|-+|sample|example|test(\s*scholarship)?)$/i;
+    /^(scholarship\s*name|name\s*(of|for)?\s*(the\s*)?scholarship|scholarship|grant\s*name|n\/?a|na|tbd|to\s*be\s*decided|null|undefined|-+|sample|example|test(\s*scholarship)?)(\s*\([^)]*\))?$/i;
   const name = s.name.trim();
   if (PLACEHOLDER_NAME_RE.test(name)) {
     throw new Error(`Groq returned a placeholder scholarship name: "${name}"`);
@@ -556,6 +556,10 @@ const LOW_VALUE_DOMAINS = new Set([
   "buddy4study.com", "scholarships.net.in", "getmyuni.com",
   "scholars4dev.com", "youthop.com", "sarkariresult.com",
   "collegedunia.com", "shiksha.com", "careers360.com", "edufever.com",
+  "wemakescholars.com", "scholarshiptab.com", "theglobalscholarship.org", "collegementor.com",
+  "edcsr.com", "scholarships.com", "bold.org", "scholarshipowl.com",
+  "scholarships360.com", "topuniversities.com", "gyandhan.com", "nextclimb.in",
+  "idp.com", "kcoversees.com", "amityonline.com",
 ]);
 
 function hostnameOf(url) {
@@ -564,9 +568,23 @@ function hostnameOf(url) {
 }
 
 // Skip generic job/result aggregators that don't hold scholarship detail.
+// Matches the registrable domain and any subdomain (school.careers360.com,
+// scholarships.buddy4study.com, etc.) — exact hostname matching misses those.
 function isLowValueUrl(url) {
   const h = hostnameOf(url);
-  return LOW_VALUE_DOMAINS.has(h) || /(sarkari|recruitment|admit-card|job-)/i.test(h);
+  if (/(sarkari|recruitment|admit-card|job-)/i.test(h)) return true;
+  return [...LOW_VALUE_DOMAINS].some(d => h === d || h.endsWith("." + d));
+}
+
+// URLs we must never surface to users as an Apply target or provenance: social /
+// video pages (a YouTube clip is not an application page) and aggregator/competitor
+// domains (buddy4study, wemakescholars, etc. — sending users there hands our traffic
+// to a rival). Returns null so callers fall back to a real source or drop the link.
+function sanitizeExternalUrl(url) {
+  if (!url) return null;
+  if (IS_BAD_URL(url)) return null;
+  if (isLowValueUrl(url)) return null;
+  return url;
 }
 
 // Binary / non-HTML URLs that can never contain scholarship detail. The markdown
@@ -758,8 +776,9 @@ async function processSource(source) {
     console.log(`  ⏭  No valid scholarship on page — skipping.`);
     return false;
   }
-  data.source_url = source.url;
-  data.verified   = true;
+  data.application_url = sanitizeExternalUrl(data.application_url);
+  data.source_url      = sanitizeExternalUrl(source.url);
+  data.verified        = true;
 
   const existing = await Scholarship.findOne({
     $or: [{ name: data.name }, { source_url: source.url }]
