@@ -57,9 +57,27 @@ AtlasFunding is a scholarship matching platform built for Indian students. It pr
    NODE_ENV=development
    CLIENT_URL=http://localhost:5173
    GROQ_API_KEY=<optional, enables AI parsing/search>
-   FIRECRAWL_API_KEY=<required for the scraper>
+   JINA_API_KEY=<optional; free key raises the scraper's rate limit to ~100 req/min>
+   FIRECRAWL_API_KEY=<optional reserve; fallback for anti-bot pages>
    CRON_SECRET=<optional locally, required in production>
    ```
+
+## Scraping pipeline
+
+The scraper (`scripts/scrape.js`) discovers and ingests scholarships:
+
+1. **Discovery (free)** — crawls the trusted listing pages (Buddy4Study, NSP,
+   NewStrides, etc.) for internal detail-page links.
+2. **Scrape** — each page is fetched via **Jina Reader** (`r.jina.ai`, free) into
+   markdown.
+3. **Extract** — **Groq** turns the markdown into structured scholarship JSON
+   (schema matches the `Scholarship` model; a `valid: false` gate drops non-
+   scholarship pages).
+4. **Fallback** — pages Jina can't read (JS-heavy / anti-bot) fall back to
+   **Firecrawl**, which also augments discovery if a key is present.
+
+Exchange rates for foreign-currency amounts live in `FX_RATES_INR` at the top of
+`scripts/scrape.js` (kept out of the LLM prompt so they're refreshable).
 
 ## Running Locally
 

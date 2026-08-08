@@ -15,6 +15,20 @@ const Scholarship = require("../src/models/Scholarship");
 
 const FIRECRAWL_KEY = process.env.FIRECRAWL_API_KEY;
 const GROQ_KEY = process.env.GROQ_API_KEY;
+// Optional — a free Jina API key raises scrape rate limits (~20 → 100 req/min).
+const JINA_KEY = process.env.JINA_API_KEY;
+
+// Refreshable INR exchange rates — used at ingest-time to normalize foreign
+// amounts. Kept OUT of the Groq prompt so the LLM stores currency as-stated and
+// these constants can be updated without touching the prompt.
+const FX_RATES_INR = {
+  INR: 1, USD: 83, GBP: 105, EUR: 90, AUD: 54, CAD: 61, SGD: 62, JPY: 0.56, AED: 23,
+};
+function convertToInr(value, currency) {
+  const rate = FX_RATES_INR[(currency || "INR").toUpperCase()];
+  if (!rate) return value || null;
+  return Math.round((value || 0) * rate);
+}
 
 // ── Default sources to always scrape ───────────────────────────────────────────
 const DEFAULT_SOURCES = [
@@ -188,11 +202,21 @@ function sanitizeScholarshipData(raw) {
     throw new Error("Groq extraction returned no valid scholarship name.");
   }
 
-  if (s.amount_value && typeof s.amount_value !== "number") {
-    s.amount_value = parseFloat(String(s.amount_value).replace(/[^0-9.]/g, "")) || 0;
+  if (typeof s.amount_value === "string") {
+    s.amount_value = parseFloat(String(s.amount_value).replace(/[^0-9.]/g, ""));
+  }
+  // Normalize any foreign-currency amount to INR at ingest time. Rates live in
+  // FX_RATES_INR (refreshable) — the LLM stores currency as-stated.
+  if (s.amount_value && !isNaN(Number(s.amount_value))) {
+    s.amount_value = convertToInr(Number(s.amount_value), s.amount_currency);
+    s.amount_currency = "INR";
   }
   if (s.max_income_annual && typeof s.max_income_annual !== "number") {
     s.max_income_annual = parseFloat(String(s.max_income_annual).replace(/[^0-9.]/g, "")) || null;
+  }
+  // Work experience defaults to 0 (not required) when the page is silent.
+  if (s.min_work_experience == null || isNaN(Number(s.min_work_experience))) {
+    s.min_work_experience = 0;
   }
 
   if (typeof s.requires_disability !== "boolean") {
@@ -224,55 +248,70 @@ function sanitizeScholarshipData(raw) {
   return s;
 }
 
-const EXTRACTION_PROMPT = `You are a scholarship data extraction engine for an Indian student platform.
+const EXTRACTION_PROMPT = `You are a data extraction engine for an Indian student scholarship database. Given raw markdown scraped from a page, extract the scholarship and return ONLY a valid JSON object — no preamble, no markdown fences.
 
-Extract scholarship details from the provided page content and return ONLY a valid JSON object.
+If the page does not describe an actual scholarship/grant/funding opportunity (nav page, index,404, article, unrelated), return: {"valid": false}
 
-IMPORTANT — use EXACTLY these values for enum fields:
-- education_level: must be one of: "school", "diploma", "undergrad", "postgrad", "doctorate", "any"
-- cover_type: must be one of: "full", "partial", "tuition_only", "varies"
-- study_location: must be one of: "India", "Abroad", "Both"
-- provider_type: must be one of: "government", "corporate", "ngo", "university", "international"
+Otherwise use EXACTLY these enum values:
+- education_level: "school" | "diploma" | "undergrad" | "postgrad" | "doctorate" | "any"
+- cover_type: "full" | "partial" | "tuition_only" | "varies"
+- study_location: "India" | "Abroad" | "Both"
+- provider_type: "government" | "corporate" | "ngo" | "university" | "international"
 
-Return this exact JSON structure:
+Return exactly:
 {
+  "valid": true,
   "name": "Official scholarship name (required)",
-  "provider": "Organization providing the scholarship",
-  "amount_value": 50000,
-  "amount_currency": "INR",
+  "provider": "Organization providing it",
+  "amount_value": <number, as stated on page>,
+  "amount_currency": "INR" | "USD" | "GBP" | "...",
   "amount_string": "₹50,000 per year",
   "cover_type": "partial",
-  "cover_details": "What costs are covered",
+  "cover_details": "What costs are covered, or null",
   "education_level": "undergrad",
   "field_of_study": ["Engineering", "Science"],
   "country": "India",
   "study_location": "India",
-  "max_income_annual": 800000,
-  "min_gpa": 60,
+  "max_income_annual": <number, or null>,
+  "min_gpa": <number, or null>,
   "requires_disability": false,
   "citizenship": "Indian",
-  "min_work_experience": 0,
+  "min_work_experience": <number, default 0 if not mentioned — never null>,
   "required_gender": "Any",
-  "deadline": "2026-12-31",
-  "application_url": "https://example.com/apply",
+  "deadline": "YYYY-MM-DD or null",
+  "application_url": "https://... or null",
   "required_documents": ["Marksheets", "Income Certificate"],
-  "application_effort_hours": 4,
+  "application_effort_hours": <number, or null>,
   "provider_type": "government",
   "awards_per_year": null,
-  "notes": "Any extra information"
+  "notes": "Any extra info, or null"
 }
 
 Rules:
-- Use null for unknown numeric fields
-- Convert all amounts to INR (1 USD = 83 INR, 1 GBP = 105 INR)
-- Deadline format: YYYY-MM-DD, default to 2027-03-31 if not found
-- Return ONLY the JSON object, no markdown fences, no extra text`;
+- Never invent data. Use null when a field isn't stated on the page.
+- If work experience isn't mentioned, default min_work_experience to 0, not null.
+- Dates must be YYYY-MM-DD; if only month/year given, use the 1st of that month.
+- Do NOT convert currencies — keep amount_value and amount_currency as the page states them.
+- Return ONLY the JSON object.`;
+
+// Strip common boilerplate (nav, footer, cookie banners, share widgets) so each
+// Groq call uses fewer tokens and the model isn't distracted by junk.
+function cleanMarkdown(md) {
+  return String(md || "")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/Cookie|Privacy Policy|Terms of Service|All rights reserved|Share on|Follow us|Subscribe to our newsletter/gi, "")
+    .split("\n")
+    .map(l => l.trim())
+    .filter(l => l.length > 0)
+    .join("\n");
+}
 
 async function extractWithGroq(text) {
   if (!GROQ_KEY) throw new Error("GROQ_API_KEY not set in .env");
   const Groq = require("groq-sdk");
   const groq = new Groq({ apiKey: GROQ_KEY });
 
+  const cleaned = cleanMarkdown(text);
   const completion = await groq.chat.completions.create({
     model: "llama-3.1-8b-instant",
     max_tokens: 1000,
@@ -280,7 +319,7 @@ async function extractWithGroq(text) {
     response_format: { type: "json_object" },
     messages: [
       { role: "system", content: EXTRACTION_PROMPT },
-      { role: "user", content: `Extract scholarship data from this page:\n\n${text.substring(0, 8000)}` },
+      { role: "user", content: `Extract scholarship data from this page:\n\n${cleaned.substring(0, 8000)}` },
     ],
   });
 
@@ -289,11 +328,14 @@ async function extractWithGroq(text) {
   try {
     parsed = JSON.parse(raw);
   } catch (err) {
-    const cleaned = raw.replace(/^```json?\s*/i, "").replace(/```\s*$/i, "").trim();
-    const match = cleaned.match(/\{[\s\S]*\}/);
+    const cleanedRaw = raw.replace(/^```json?\s*/i, "").replace(/```\s*$/i, "").trim();
+    const match = cleanedRaw.match(/\{[\s\S]*\}/);
     if (!match) throw new Error("Groq did not return valid JSON");
     parsed = JSON.parse(match[0]);
   }
+
+  // Early-exit gate: page isn't actually a scholarship → caller skips it.
+  if (parsed.valid === false) return null;
 
   return sanitizeScholarshipData(parsed);
 }
@@ -322,6 +364,25 @@ function firecrawlScrape(url) {
     req.on("error", reject);
     req.write(body);
     req.end();
+  });
+}
+
+// Free Jina Reader — returns the page as clean markdown. A free JINA_API_KEY
+// raises rate limits (~20 → 100 req/min) and adds a token budget. Used first;
+// Firecrawl stays as a fallback for anti-bot / JS-heavy pages.
+function jinaScrape(url) {
+  return new Promise((resolve, reject) => {
+    const headers = { Accept: "text/markdown", "X-Timeout": "30" };
+    if (JINA_KEY) headers.Authorization = `Bearer ${JINA_KEY}`;
+    https.get(`https://r.jina.ai/${url}`, { headers }, (res) => {
+      if (res.statusCode >= 400) {
+        res.resume();
+        return reject(new Error(`Jina HTTP ${res.statusCode}`));
+      }
+      let data = "";
+      res.on("data", c => data += c);
+      res.on("end", () => resolve(data));
+    }).on("error", reject);
   });
 }
 
@@ -423,11 +484,91 @@ async function discoverNewScholarshipSites(targetLimit = 100) {
   return discovered;
 }
 
+// Links that plausibly point at an individual scholarship detail page (heuristic
+// used when crawling listing pages — aggregators often use /scholarship/ slugs).
+const DETAIL_TOKEN = /(scholarship|fellowship|grant|bursary|\/scholarship\/|\/scholarships\/|apply-)/i;
+
+// Extract absolute URLs from Jina's markdown link syntax: [label](href).
+function extractInternalLinks(markdown, baseHost) {
+  const links = [];
+  const seen = new Set();
+  const re = /\[[^\]]*\]\(([^)\s]+)\)/g;
+  let m;
+  while ((m = re.exec(String(markdown))) !== null) {
+    const href = m[1].replace(/[)"'<>]+$/g, "");
+    let abs;
+    try { abs = new URL(href, `https://${baseHost}`).href; } catch { continue; }
+    if (seen.has(abs)) continue;
+    seen.add(abs);
+    links.push(abs);
+  }
+  return links;
+}
+
+// FREE discovery: crawl the trusted listing pages (DEFAULT_SOURCES) for their
+// internal detail-page links, then those get Jina-scraped individually in the
+// main loop. No search credits spent. Firecrawl search remains as a fallback.
+async function discoverViaCrawl(targetLimit = 100) {
+  const limit = Math.min(200, Math.max(1, targetLimit || 100));
+  const discovered = [];
+  const seenUrls = new Set();
+
+  console.log(`🔍 Crawling ${DEFAULT_SOURCES.length} trusted listing pages for detail links...`);
+
+  for (const src of DEFAULT_SOURCES) {
+    try {
+      const baseHost = hostnameOf(src.url);
+      let markdown;
+      try {
+        markdown = await jinaScrape(src.url);
+      } catch {
+        const scraped = await firecrawlScrape(src.url);
+        markdown = scraped?.data?.markdown || "";
+      }
+
+      const links = extractInternalLinks(markdown, baseHost);
+      console.log(`  ${src.name}: ${links.length} links found`);
+      for (const url of links) {
+        if (seenUrls.has(url) || IS_BAD_URL(url) || isLowValueUrl(url)) continue;
+        seenUrls.add(url);
+        // Keep only links that look like detail pages (or are already on a
+        // scholarship-ish host) — drop nav/footer/social clutter.
+        if (DETAIL_TOKEN.test(url) || sourceValue(url) >= 3) {
+          discovered.push({ url, name: hostnameOf(url) });
+        }
+      }
+    } catch (err) {
+      console.warn(`  ⚠️  Crawl of ${src.name} failed: ${err.message}`);
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+
+  // Official/academic detail pages first.
+  discovered.sort((a, b) => sourceValue(b.url) - sourceValue(a.url));
+  discovered.splice(limit);
+
+  console.log(`🔎 Crawl Discovery: found ${discovered.length} unique potential detail pages.\n`);
+  return discovered;
+}
+
 async function processSource(source) {
   console.log(`\n📄 [${source.name}] ${source.url}`);
 
-  const scraped = await firecrawlScrape(source.url);
-  const markdown = scraped?.data?.markdown || "";
+  // Jina first (free), Firecrawl as fallback for blocked / JS-heavy pages.
+  let markdown = null;
+  try {
+    markdown = await jinaScrape(source.url);
+  } catch (jinaErr) {
+    console.log(`  ⚠️  Jina failed (${jinaErr.message}) — falling back to Firecrawl.`);
+    try {
+      const scraped = await firecrawlScrape(source.url);
+      markdown = scraped?.data?.markdown || "";
+    } catch (fcErr) {
+      console.log(`  ⚠️  Firecrawl also failed (${fcErr.message}) — skipping.`);
+      return false;
+    }
+  }
+  markdown = markdown || "";
 
   if (!markdown || markdown.length < 100) {
     console.log(`  ⚠️  Page too short or empty (${markdown.length} chars) — skipping.`);
@@ -438,6 +579,10 @@ async function processSource(source) {
   console.log(`  🤖 Extracting scholarship fields with Groq AI...`);
 
   const data = await extractWithGroq(markdown);
+  if (!data) {
+    console.log(`  ⏭  No valid scholarship on page — skipping.`);
+    return false;
+  }
   data.source_url = source.url;
   data.verified   = true;
 
@@ -470,7 +615,17 @@ async function runScraper(manualUrl = null, targetLimit = 100) {
       console.error(`  ❌ Failed: ${err.message}`);
     }
   } else {
-    const discovered = await discoverNewScholarshipSites(targetLimit);
+    // Free crawl first (no credits). Firecrawl search augments coverage only if
+    // a key is present — treated as a reserve, not the primary discovery path.
+    const crawled = await discoverViaCrawl(targetLimit);
+    let discovered = [...crawled];
+    if (FIRECRAWL_KEY) {
+      const searched = await discoverNewScholarshipSites(targetLimit);
+      const seen = new Set(crawled.map(s => s.url));
+      for (const s of searched) {
+        if (!seen.has(s.url)) { seen.add(s.url); discovered.push(s); }
+      }
+    }
     const allSources = [...DEFAULT_SOURCES, ...discovered];
     console.log(`📋 Processing ${allSources.length} sources (${DEFAULT_SOURCES.length} default + ${discovered.length} discovered)\n`);
 
