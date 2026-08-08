@@ -118,11 +118,32 @@ export async function renderRepository(el) {
   await loadData();
 }
 
+// Placeholder cards shown while the repository loads — matches the real card
+// skeleton so the layout doesn't jump when data arrives.
+function renderSkeleton(grid, count = 8) {
+  grid.innerHTML = Array.from({ length: count }, () => `
+    <div class="card repo-card skeleton-card" style="padding: 24px;">
+      <div class="flex-between mb-16">
+        <span class="skeleton" style="width: 80px; height: 18px;"></span>
+        <span class="skeleton" style="width: 90px; height: 14px;"></span>
+      </div>
+      <div class="skeleton skeleton-line lg mb-16"></div>
+      <div class="skeleton skeleton-line sm mb-16"></div>
+      <div class="skeleton skeleton-line lg" style="width: 50%;"></div>
+      <div class="skeleton skeleton-line sm mb-16"></div>
+      <div class="flex gap-8" style="justify-content: flex-end; margin-top: 8px;">
+        <div class="skeleton" style="width: 90px; height: 32px; border-radius: 8px;"></div>
+        <div class="skeleton" style="width: 90px; height: 32px; border-radius: 8px;"></div>
+      </div>
+    </div>
+  `).join("");
+}
+
 async function loadData() {
   const grid = document.getElementById("repo-grid");
   const statsEl = document.getElementById("repo-header-stats");
 
-  grid.innerHTML = `<div style="grid-column: 1/-1; text-align: center; padding: 40px; color: var(--text-muted);">Loading scholarships...</div>`;
+  renderSkeleton(grid);
 
   try {
     let data;

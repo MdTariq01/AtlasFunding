@@ -79,6 +79,24 @@ a:hover { color: var(--primary-hover); }
 .page { padding-top: 80px; min-height: 100vh; }
 
 .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 24px; }
+
+/* Skeleton loading placeholder — mimics the repo-card layout while data loads. */
+@keyframes shimmer { 0% { background-position: -400px 0; } 100% { background-position: 400px 0; } }
+.skeleton {
+  background: linear-gradient(90deg, var(--bg-card) 25%, var(--border-strong) 37%, var(--bg-card) 63%);
+  background-size: 800px 100%;
+  animation: shimmer 1.2s linear infinite;
+  border-radius: 6px;
+}
+.skeleton-card {
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.skeleton-line { height: 14px; }
+.skeleton-line.lg { height: 20px; width: 70%; }
+.skeleton-line.sm { width: 40%; }
 .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
 .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; }
 
