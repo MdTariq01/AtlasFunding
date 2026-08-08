@@ -129,7 +129,7 @@ async function loadData() {
     if (searchQuery) {
       data = await api.repository.search(searchQuery);
     } else {
-      data = await api.repository.list({ filter: currentFilter, limit: 100 });
+      data = await api.repository.list({ filter: currentFilter, limit: 500 });
     }
 
     const items = data.scholarships || [];

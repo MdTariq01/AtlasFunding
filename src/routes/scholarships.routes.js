@@ -135,7 +135,9 @@ router.get("/", publicLimiter, optionalAuth, async (req, res) => {
       });
     }
 
-    const allScholarships = await Scholarship.find({}).select("amount_value").lean();
+    // Sum funding over the SAME filtered set the grid shows, so the "Cr total pool"
+    // shrinks/grows with the active filter instead of always reporting the whole DB.
+    const allScholarships = await Scholarship.find(query).select("amount_value").lean();
     const totalFunding = allScholarships.reduce((sum, s) => sum + (s.amount_value || 0), 0);
 
     res.json({

@@ -30,6 +30,10 @@ function convertToInr(value, currency) {
   return Math.round((value || 0) * rate);
 }
 
+// Shared pause used across discovery loops to keep each step under its provider's
+// per-minute rate limit (Firecrawl search, Jina, etc.).
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 // ── Default sources to always scrape ───────────────────────────────────────────
 const DEFAULT_SOURCES = [
   { url: "https://www.buddy4study.com/scholarships", name: "Buddy4Study" },
@@ -180,6 +184,64 @@ const PROVIDER_MAP = {
   international: "international", global: "international",
 };
 
+// ── Firecrawl search throttling ────────────────────────────────────────────────
+// Search credits are the scarcest resource and Firecrawl rate-limits aggressively
+// (the discovery pass once failed 15/25 queries with HTTP 429). A short fixed gap
+// between queries keeps us under the per-minute window; a backoff/retry soaks up
+// any residual 429s instead of dropping the query.
+const SEARCH_DELAY_MS = 800;     // ~800ms between search calls
+const SEARCH_MAX_RETRIES = 2;    // on 429, back off 5s/10s and retry before giving up
+
+// Single Firecrawl /v1/search call with 429-aware backoff + retry.
+async function firecrawlSearch(query, limit) {
+  const body = JSON.stringify({ query, limit });
+  const doRequest = () => new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: "api.firecrawl.dev",
+      path: "/v1/search",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${FIRECRAWL_KEY}`,
+        "Content-Length": Buffer.byteLength(body),
+      },
+    }, (res) => {
+      let data = "";
+      res.on("data", c => data += c);
+      res.on("end", () => {
+        // Reject before parsing so a proxy/upstream HTML error page (e.g.
+        // "Bad Gateway") surfaces as a clean, actionable message — not a raw
+        // JSON.parse crash.
+        if (res.statusCode && res.statusCode >= 400) {
+          const err = new Error(`Firecrawl search HTTP ${res.statusCode}`);
+          err.statusCode = res.statusCode;
+          return reject(err);
+        }
+        try { resolve(JSON.parse(data)); }
+        catch { reject(new Error("Firecrawl search returned a non-JSON response")); }
+      });
+    });
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+
+  for (let attempt = 0; attempt <= SEARCH_MAX_RETRIES; attempt++) {
+    try {
+      return await doRequest();
+    } catch (err) {
+      const retryable = err.statusCode === 429 && attempt < SEARCH_MAX_RETRIES;
+      if (retryable) {
+        const backoffMs = 5000 * (attempt + 1); // 5s, then 10s
+        console.log(`    ↻ Rate-limited (429) — backing off ${backoffMs / 1000}s and retrying (attempt ${attempt + 1}/${SEARCH_MAX_RETRIES})...`);
+        await sleep(backoffMs);
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 function normalizeEnum(value, map, fallback) {
   if (!value) return fallback;
   const lower = String(value).toLowerCase().trim();
@@ -202,6 +264,16 @@ function sanitizeScholarshipData(raw) {
     throw new Error("Groq extraction returned no valid scholarship name.");
   }
 
+  // Reject placeholder / garbage names — Groq occasionally echoes an example
+  // field ("Scholarship Name") or a generic fragment ("Undergraduate enrolment
+  // tuition fee amount") instead of a real programme. These are not scholarships.
+  const PLACEHOLDER_NAME_RE =
+    /^(scholarship\s*name|name\s*(of|for)?\s*(the\s*)?scholarship|scholarship|grant\s*name|n\/?a|na|tbd|to\s*be\s*decided|null|undefined|-+|sample|example|test(\s*scholarship)?)$/i;
+  const name = s.name.trim();
+  if (PLACEHOLDER_NAME_RE.test(name)) {
+    throw new Error(`Groq returned a placeholder scholarship name: "${name}"`);
+  }
+
   if (typeof s.amount_value === "string") {
     s.amount_value = parseFloat(String(s.amount_value).replace(/[^0-9.]/g, ""));
   }
@@ -210,6 +282,16 @@ function sanitizeScholarshipData(raw) {
   if (s.amount_value && !isNaN(Number(s.amount_value))) {
     s.amount_value = convertToInr(Number(s.amount_value), s.amount_currency);
     s.amount_currency = "INR";
+  }
+  // Aggregate/endowment figures ("$655 million" fund, "₹100 crore corpus") are
+  // program-wide pools, not per-student awards. One such mis-parse poisons the
+  // funding-pool metric (a single bad record once dominated 99% of the total).
+  // No Indian scholarship award exceeds ₹50Cr, so zero these out and let
+  // cover_type drive the display instead. // ponytail: absolute ceiling, refine
+  // to an aggregate-keyword check only if a legit large award ever appears.
+  if (s.amount_value > 500000000) {
+    s.amount_value = null;
+    s.amount_string = null; // regenerated below from cover_type
   }
   if (s.max_income_annual && typeof s.max_income_annual !== "number") {
     s.max_income_annual = parseFloat(String(s.max_income_annual).replace(/[^0-9.]/g, "")) || null;
@@ -294,6 +376,58 @@ Rules:
 - Do NOT convert currencies — keep amount_value and amount_currency as the page states them.
 - Return ONLY the JSON object.`;
 
+// Fields that tend to sit BELOW a scholarship's description/story on Indian
+// listing pages (eligibility, deadlines, how-to-apply). A flat front-truncation
+// cuts them off, yielding valid:true records with a real name but null
+// eligibility/deadline — quietly incomplete, never a crash. So instead of a
+// blunt head-cut we keep the page head (name + description context) plus windows
+// around the lines that carry those fields, capped so the request stays under
+// Groq's TPM limit.
+const FIELD_KEYWORD_RE = /eligib|deadline|last\s*date|criteria|how\s*to\s*apply|requirement|selection\s*(process|criteria)|application\s*(process|fee|form)/i;
+const EXTRACTION_HEAD_CHARS = 1500; // always keep the top of the page (context)
+const FIELD_WINDOW_CHARS = 2500;     // chars centered on each keyword line
+const EXTRACTION_MAX_CHARS = 5500;   // hard cap to keep the request token-safe
+
+function truncateForExtraction(md) {
+  const text = String(md || "");
+  const lines = text.split("\n");
+
+  // Record each line's char offset so we can slice windows back out of the raw text.
+  const offsets = [];
+  let pos = 0;
+  for (const ln of lines) { offsets.push(pos); pos += ln.length + 1; }
+
+  // One centered window per keyword-bearing line, then merge overlaps.
+  const windows = [];
+  lines.forEach((ln, i) => {
+    if (FIELD_KEYWORD_RE.test(ln)) {
+      windows.push([
+        Math.max(0, offsets[i] - Math.floor(FIELD_WINDOW_CHARS / 2)),
+        Math.min(text.length, offsets[i] + ln.length + Math.ceil(FIELD_WINDOW_CHARS / 2)),
+      ]);
+    }
+  });
+  windows.sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const [s, e] of windows) {
+    if (merged.length && s <= merged[merged.length - 1][1]) {
+      merged[merged.length - 1][1] = Math.max(merged[merged.length - 1][1], e);
+    } else {
+      merged.push([s, e]);
+    }
+  }
+
+  // Head + windows, skipping any window that overlaps the head, capped overall.
+  let out = text.slice(0, EXTRACTION_HEAD_CHARS);
+  for (const [s, e] of merged) {
+    if (out.length >= EXTRACTION_MAX_CHARS) break;
+    const cs = Math.max(s, EXTRACTION_HEAD_CHARS); // don't re-add the head
+    if (cs >= e) continue;
+    out += "\n\n" + text.slice(cs, e);
+  }
+  return out.slice(0, EXTRACTION_MAX_CHARS).trim();
+}
+
 // Strip common boilerplate (nav, footer, cookie banners, share widgets) so each
 // Groq call uses fewer tokens and the model isn't distracted by junk.
 function cleanMarkdown(md) {
@@ -306,24 +440,52 @@ function cleanMarkdown(md) {
     .join("\n");
 }
 
-async function extractWithGroq(text) {
+// Groq TPM can 429 mid-cooldown — the same scarcity Firecrawl search showed, and
+// it costs real scholarships (whole legitimate pages lost, not just API calls).
+// Retry with backoff, parsing the exact wait Groq reports ("try again in 12.99s")
+// instead of guessing; fall back to a 5s/10s ramp when the message omits it.
+const GROQ_MAX_RETRIES = 2;
+
+async function groqExtract(content) {
   if (!GROQ_KEY) throw new Error("GROQ_API_KEY not set in .env");
   const Groq = require("groq-sdk");
   const groq = new Groq({ apiKey: GROQ_KEY });
 
-  const cleaned = cleanMarkdown(text);
-  const completion = await groq.chat.completions.create({
-    model: "llama-3.1-8b-instant",
-    max_tokens: 1000,
-    temperature: 0,
-    response_format: { type: "json_object" },
-    messages: [
-      { role: "system", content: EXTRACTION_PROMPT },
-      { role: "user", content: `Extract scholarship data from this page:\n\n${cleaned.substring(0, 8000)}` },
-    ],
-  });
+  for (let attempt = 0; attempt <= GROQ_MAX_RETRIES; attempt++) {
+    try {
+      const completion = await groq.chat.completions.create({
+        model: "llama-3.1-8b-instant",
+        max_tokens: 1000,
+        temperature: 0,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: EXTRACTION_PROMPT },
+          { role: "user", content: `Extract scholarship data from this page:\n\n${content}` },
+        ],
+      });
+      return completion.choices[0].message.content.trim();
+    } catch (err) {
+      const retryable = err.status === 429 && attempt < GROQ_MAX_RETRIES;
+      if (retryable) {
+        const waitMatch = String(err.message || "").match(/try again in ([\d.]+)s/i);
+        const waitMs = waitMatch ? parseFloat(waitMatch[1]) * 1000 + 500 : 5000 * (attempt + 1);
+        console.log(`    ↻ Groq rate-limited (429) — retrying in ${(waitMs / 1000).toFixed(1)}s (attempt ${attempt + 1}/${GROQ_MAX_RETRIES})...`);
+        await sleep(waitMs);
+        continue;
+      }
+      throw err;
+    }
+  }
+}
 
-  const raw = completion.choices[0].message.content.trim();
+async function extractWithGroq(text) {
+  const cleaned = cleanMarkdown(text);
+  // Keyword-anchored truncation keeps the page head PLUS the eligibility/deadline
+  // sections that Indian listing pages bury below the description — and caps total
+  // size so the request stays under Groq's on-demand TPM limit (a flat 4000-char
+  // cut was token-safe but silently dropped exactly those fields).
+  const content = truncateForExtraction(cleaned);
+  const raw = await groqExtract(content);
   let parsed;
   try {
     parsed = JSON.parse(raw);
@@ -407,6 +569,29 @@ function isLowValueUrl(url) {
   return LOW_VALUE_DOMAINS.has(h) || /(sarkari|recruitment|admit-card|job-)/i.test(h);
 }
 
+// Binary / non-HTML URLs that can never contain scholarship detail. The markdown
+// link extractor picks up image and asset links (both [label](url) and ![alt](url))
+// off listing pages; scraping those wastes a Jina/Firecrawl call each and, worse,
+// can feed a tiny image-scrape to Groq, which hallucinates a "scholarship".
+const ASSET_EXT_RE = /\.(png|jpe?g|gif|svg|webp|bmp|ico|pdf|zip|rar|7z|tar|gz|mp4|mp3|woff2?|ttf|eot|css|js)([?#&]|$)/i;
+const ASSET_HOST_RE = /(cdn|cloudfront|amazonaws\.com|^s3|static|imgcdn|images?\.|logo)/i;
+const SKIP_SCHEME_RE = /^(data:|mailto:|tel:|javascript:|blob:)/i;
+
+function isAssetUrl(url) {
+  const lower = String(url || "").toLowerCase().trim();
+  if (!lower || SKIP_SCHEME_RE.test(lower)) return true;
+  if (ASSET_EXT_RE.test(lower)) return true;
+  try {
+    const u = new URL(lower);
+    // CDN/static/asset hosts, or asset-looking paths (…/img/…, …/logos/…).
+    if (ASSET_HOST_RE.test(u.hostname)) return true;
+    if (/\/?(img|images?|logos?|static|uploads?|assets?|_next\/image)\//.test(u.pathname)) return true;
+  } catch {
+    return true; // unparseable → not a scrapeable HTML detail page
+  }
+  return false;
+}
+
 // Prefer official/academic sources when ranking discovered pages.
 function sourceValue(url) {
   const h = hostnameOf(url);
@@ -441,32 +626,12 @@ async function discoverNewScholarshipSites(targetLimit = 100) {
 
   for (const query of selectedQueries) {
     try {
-      const result = await new Promise((resolve, reject) => {
-        const body = JSON.stringify({ query, limit: itemsPerQuery });
-        const req = https.request({
-          hostname: "api.firecrawl.dev",
-          path: "/v1/search",
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${FIRECRAWL_KEY}`,
-            "Content-Length": Buffer.byteLength(body),
-          },
-        }, (res) => {
-          let data = "";
-          res.on("data", c => data += c);
-          res.on("end", () => {
-            try { resolve(JSON.parse(data)); } catch (e) { reject(e); }
-          });
-        });
-        req.on("error", reject);
-        req.write(body);
-        req.end();
-      });
+      // Throttled + 429-retried call (see firecrawlSearch above).
+      const result = await firecrawlSearch(query, itemsPerQuery);
 
       if (result.data && Array.isArray(result.data)) {
         result.data.forEach(item => {
-          if (item.url && !seenUrls.has(item.url) && !IS_BAD_URL(item.url) && !isLowValueUrl(item.url)) {
+          if (item.url && !seenUrls.has(item.url) && !IS_BAD_URL(item.url) && !isLowValueUrl(item.url) && !isAssetUrl(item.url)) {
             seenUrls.add(item.url);
             discovered.push({ url: item.url, name: item.title || item.url });
           }
@@ -475,10 +640,14 @@ async function discoverNewScholarshipSites(targetLimit = 100) {
     } catch (err) {
       console.warn(`  ⚠️  Search query failed ("${query}"):`, err.message);
     }
+    // Steady ~800ms gap between searches keeps us under Firecrawl's per-minute
+    // limit. If it still 429s, raise SEARCH_DELAY_MS or drop numQueriesToUse.
+    await sleep(SEARCH_DELAY_MS);
   }
 
   // Process official/academic sources first, then lower-value ones.
   discovered.sort((a, b) => sourceValue(b.url) - sourceValue(a.url));
+  discovered.splice(limit); // honor --limit: don't discover more than we'll process
 
   console.log(`🌐 Site Discovery: found ${discovered.length} unique potential pages.\n`);
   return discovered;
@@ -500,6 +669,8 @@ function extractInternalLinks(markdown, baseHost) {
     try { abs = new URL(href, `https://${baseHost}`).href; } catch { continue; }
     if (seen.has(abs)) continue;
     seen.add(abs);
+    // Drop image/CDN/static/asset links — they are never scholarship detail pages.
+    if (isAssetUrl(abs)) continue;
     links.push(abs);
   }
   return links;
@@ -570,7 +741,11 @@ async function processSource(source) {
   }
   markdown = markdown || "";
 
-  if (!markdown || markdown.length < 100) {
+  // A real scholarship detail page has far more than 400 chars; anything shorter
+  // is a nav stub, error page, or image-scrape artifact that can only waste a
+  // Groq call (and occasionally trigger a hallucinated entry).
+  const MIN_CONTENT_CHARS = 400;
+  if (!markdown || markdown.length < MIN_CONTENT_CHARS) {
     console.log(`  ⚠️  Page too short or empty (${markdown.length} chars) — skipping.`);
     return false;
   }
@@ -626,8 +801,11 @@ async function runScraper(manualUrl = null, targetLimit = 100) {
         if (!seen.has(s.url)) { seen.add(s.url); discovered.push(s); }
       }
     }
-    const allSources = [...DEFAULT_SOURCES, ...discovered];
-    console.log(`📋 Processing ${allSources.length} sources (${DEFAULT_SOURCES.length} default + ${discovered.length} discovered)\n`);
+    // Cap total sources processed to --limit (defaults always run first, then as
+    // many discovered pages as fit). Previously the limit only narrowed discovery
+    // but the processing loop ran every discovered page regardless.
+    const allSources = [...DEFAULT_SOURCES, ...discovered].slice(0, targetLimit);
+    console.log(`📋 Processing ${allSources.length} sources (${DEFAULT_SOURCES.length} default + ${allSources.length - DEFAULT_SOURCES.length} discovered) — capped at ${targetLimit}\n`);
 
     for (const source of allSources) {
       try {
@@ -647,12 +825,29 @@ async function runScraper(manualUrl = null, targetLimit = 100) {
   return totalAdded;
 }
 
+// Parse the --limit flag tolerating `--limit 30`, `--limit=30`, and `--limit30`.
+function parseLimitArg(argv) {
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--limit") {
+      const n = parseInt(argv[i + 1], 10);
+      if (!isNaN(n)) return n;
+    }
+    const eq = arg.match(/^--limit=(\d+)$/);
+    if (eq) return parseInt(eq[1], 10);
+    const glued = arg.match(/^--limit(\d+)$/);
+    if (glued) return parseInt(glued[1], 10);
+  }
+  return 100;
+}
+
 if (require.main === module) {
   const urlFlagIndex = process.argv.indexOf("--url");
   const manualUrl = urlFlagIndex !== -1 ? process.argv[urlFlagIndex + 1] : null;
 
-  const limitFlagIndex = process.argv.indexOf("--limit");
-  const targetLimit = limitFlagIndex !== -1 ? parseInt(process.argv[limitFlagIndex + 1]) || 100 : 100;
+  // Accept --limit 30, --limit=30, and the commonly-typed --limit30 so the cap
+  // actually applies (a silent miss would run an unthrottled full pass).
+  const targetLimit = parseLimitArg(process.argv);
 
   runScraper(manualUrl, targetLimit)
     .then(() => process.exit(0))
