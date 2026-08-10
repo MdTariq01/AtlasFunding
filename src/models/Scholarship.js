@@ -67,6 +67,10 @@ const scholarshipSchema = new mongoose.Schema(
     verified: { type: Boolean, default: false },
     last_verified: { type: Date },
     source_url: { type: String },
+    // Raw URL the record was scraped FROM. Used for dedup even when the displayed
+    // source_url is nulled (e.g. records mined from an aggregator we don't link
+    // users to) — without it, the same aggregator page would re-ingest every run.
+    scraped_from_url: { type: String },
     notes: { type: String },
   },
   { timestamps: true }

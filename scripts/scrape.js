@@ -34,6 +34,13 @@ function convertToInr(value, currency) {
 // per-minute rate limit (Firecrawl search, Jina, etc.).
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Minimum pause between source extractions. Each source = 1 Groq call, so this
+// paces Groq at ~24 req/min to stay clear of on-demand TPM ceilings; the 429
+// backoff in groqExtract is the safety net for any burst that still slips through.
+// ponytail: fixed pacing, swap for token-aware throttling if Groq TPM is ever
+// reached at this rate.
+const SOURCE_DELAY_MS = 2500;
+
 // ── Default sources to always scrape ───────────────────────────────────────────
 const DEFAULT_SOURCES = [
   { url: "https://www.buddy4study.com/scholarships", name: "Buddy4Study" },
@@ -327,6 +334,21 @@ function sanitizeScholarshipData(raw) {
     }
   }
 
+  // Prefer the official link Groq picked from the page's outbound links over a
+  // generic application_url. Only accept it if it survives the provider sanity
+  // check (trust TLD, or a domain fragment matching the provider/name) — else
+  // fall back to application_url or null, so users never get a wrong or
+  // aggregator link.
+  const official = raw.official_source_url;
+  if (official && typeof official === "string" && /^https?:\/\//i.test(official)) {
+    if (plausibleOfficialUrl(official, s.provider, s.name)) {
+      s.application_url = official;
+    } else if (!(s.application_url && /^https?:\/\//i.test(s.application_url))) {
+      s.application_url = null;
+    }
+  }
+  delete s.official_source_url; // raw prompt field, don't persist
+
   return s;
 }
 
@@ -362,6 +384,7 @@ Return exactly:
   "required_gender": "Any",
   "deadline": "YYYY-MM-DD or null",
   "application_url": "https://... or null",
+  "official_source_url": "the exact official application/provider URL chosen from the Outbound Links list, or null",
   "required_documents": ["Marksheets", "Income Certificate"],
   "application_effort_hours": <number, or null>,
   "provider_type": "government",
@@ -371,6 +394,7 @@ Return exactly:
 
 Rules:
 - Never invent data. Use null when a field isn't stated on the page.
+- official_source_url: if one of the provided Outbound Links is clearly the scholarship's official application page or the provider's official site (matching the provider name), set it to that EXACT URL. If none match, set null. NEVER invent a URL that isn't in the provided list.
 - If work experience isn't mentioned, default min_work_experience to 0, not null.
 - Dates must be YYYY-MM-DD; if only month/year given, use the 1st of that month.
 - Do NOT convert currencies — keep amount_value and amount_currency as the page states them.
@@ -478,14 +502,21 @@ async function groqExtract(content) {
   }
 }
 
-async function extractWithGroq(text) {
+async function extractWithGroq(text, officialLinks = []) {
   const cleaned = cleanMarkdown(text);
   // Keyword-anchored truncation keeps the page head PLUS the eligibility/deadline
   // sections that Indian listing pages bury below the description — and caps total
   // size so the request stays under Groq's on-demand TPM limit (a flat 4000-char
   // cut was token-safe but silently dropped exactly those fields).
   const content = truncateForExtraction(cleaned);
-  const raw = await groqExtract(content);
+
+  // Hand the model real outbound links and force it to pick, not invent. Appended
+  // AFTER truncation so the list survives the keyword-window cutting.
+  const linkBlock = officialLinks.length
+    ? `\n\nOutbound links found on page (pick official_source_url from these ONLY):\n${officialLinks.map((l) => `- ${l.text} → ${l.url}`).join("\n")}`
+    : "\n\nNo outbound links provided — official_source_url must be null.";
+
+  const raw = await groqExtract(content + linkBlock);
   let parsed;
   try {
     parsed = JSON.parse(raw);
@@ -499,7 +530,9 @@ async function extractWithGroq(text) {
   // Early-exit gate: page isn't actually a scholarship → caller skips it.
   if (parsed.valid === false) return null;
 
-  return sanitizeScholarshipData(parsed);
+  // Pass the link list along so the sanity check can tie the picked URL back to
+  // the provider name (which isn't known until after this extraction).
+  return sanitizeScholarshipData(parsed, officialLinks);
 }
 
 function firecrawlScrape(url) {
@@ -567,13 +600,25 @@ function hostnameOf(url) {
   catch { return ""; }
 }
 
-// Skip generic job/result aggregators that don't hold scholarship detail.
-// Matches the registrable domain and any subdomain (school.careers360.com,
-// scholarships.buddy4study.com, etc.) — exact hostname matching misses those.
-function isLowValueUrl(url) {
+// Job/result boards (sarkari results, recruitment, admit cards) never hold
+// scholarship detail and should not even be crawled. Kept separate from the
+// aggregator check below so we can read aggregator detail pages as DATA while
+// still refusing to link users to them.
+function isJobPortalUrl(url) {
   const h = hostnameOf(url);
-  if (/(sarkari|recruitment|admit-card|job-)/i.test(h)) return true;
+  return /(sarkari|recruitment|admit-card|job-)/i.test(h);
+}
+
+// Aggregator/competitor domains. Matches the registrable domain and any subdomain
+// (school.careers360.com, scholarships.buddy4study.com, etc.) — exact hostname
+// matching misses those.
+function isAggregatorUrl(url) {
+  const h = hostnameOf(url);
   return [...LOW_VALUE_DOMAINS].some(d => h === d || h.endsWith("." + d));
+}
+
+function isLowValueUrl(url) {
+  return isJobPortalUrl(url) || isAggregatorUrl(url);
 }
 
 // URLs we must never surface to users as an Apply target or provenance: social /
@@ -585,6 +630,46 @@ function sanitizeExternalUrl(url) {
   if (IS_BAD_URL(url)) return null;
   if (isLowValueUrl(url)) return null;
   return url;
+}
+
+// Pull real outbound links from scraped markdown BEFORE Groq, so the model can
+// pick the scholarship's official source instead of hallucinating a URL. Excludes
+// internal links, assets, and aggregator/competitor domains (no aggregator→
+// aggregator chaining). Returns a short list the prompt constrains Groq to.
+function extractOutboundLinks(markdown, sourceDomain) {
+  const urls = [...String(markdown || "").matchAll(/\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/g)]
+    .map((m) => ({ text: m[1].slice(0, 80), url: m[2] }));
+
+  const out = [];
+  for (const { text, url } of urls) {
+    try {
+      const domain = hostnameOf(url);
+      if (!domain) continue;
+      if (domain === sourceDomain) continue;   // internal link
+      if (isAssetUrl(url)) continue;            // images/PDFs/etc
+      if (isAggregatorUrl(url)) continue;       // don't chain aggregator→aggregator
+      if (isJobPortalUrl(url)) continue;
+      out.push({ text: text.trim() || domain, url });
+    } catch { /* skip malformed URL */ }
+    if (out.length >= 15) break; // keep the prompt small
+  }
+  return out;
+}
+
+// Sanity check before trusting an official link the model picked: accept clear
+// trust TLDs (.gov/.edu/.ac.in/.org) outright, otherwise require the URL domain
+// to share a recognizable fragment of the provider/scholarship name — rejects
+// generic .com links we can't tie back to the provider (ads, related articles).
+function plausibleOfficialUrl(url, provider, name) {
+  const domain = hostnameOf(url);
+  if (!domain) return false;
+  if (/(\.gov\.|\.govt\.|\.edu\.|\.ac\.in|\.nic\.in|\.org)/i.test(domain)) return true;
+  const haystack = (domain + " " + (url.match(/^https?:\/\/([^/]+)/)?.[1] || "")).toLowerCase();
+  for (const frag of [provider, name]) {
+    const norm = String(frag || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (norm.length >= 5 && haystack.includes(norm)) return true;
+  }
+  return false;
 }
 
 // Binary / non-HTML URLs that can never contain scholarship detail. The markdown
@@ -718,7 +803,9 @@ async function discoverViaCrawl(targetLimit = 100) {
       const links = extractInternalLinks(markdown, baseHost);
       console.log(`  ${src.name}: ${links.length} links found`);
       for (const url of links) {
-        if (seenUrls.has(url) || IS_BAD_URL(url) || isLowValueUrl(url)) continue;
+        // Block only job portals here — aggregator detail pages are legit DATA
+        // sources now (their links are stripped before users ever see them).
+        if (seenUrls.has(url) || IS_BAD_URL(url) || isJobPortalUrl(url)) continue;
         seenUrls.add(url);
         // Keep only links that look like detail pages (or are already on a
         // scholarship-ish host) — drop nav/footer/social clutter.
@@ -771,17 +858,26 @@ async function processSource(source) {
   console.log(`  📝 Scraped ${markdown.length.toLocaleString()} chars`);
   console.log(`  🤖 Extracting scholarship fields with Groq AI...`);
 
-  const data = await extractWithGroq(markdown);
+  // Aggregate the page's outbound links so Groq can pick the real application
+  // URL from them (never invents one). Aggregators/details are allowed as data
+  // sources, but only official links survive as application_url.
+  const links = extractOutboundLinks(markdown, hostnameOf(source.url));
+
+  const data = await extractWithGroq(markdown, links);
   if (!data) {
     console.log(`  ⏭  No valid scholarship on page — skipping.`);
     return false;
   }
   data.application_url = sanitizeExternalUrl(data.application_url);
   data.source_url      = sanitizeExternalUrl(source.url);
+  // Raw page the record was mined from — used ONLY for dedup. Kept even when the
+  // displayed source_url is nulled (aggregator), else the same page re-ingests
+  // every run.
+  data.scraped_from_url = source.url;
   data.verified        = true;
 
   const existing = await Scholarship.findOne({
-    $or: [{ name: data.name }, { source_url: source.url }]
+    $or: [{ name: data.name }, { scraped_from_url: source.url }]
   });
   if (existing) {
     console.log(`  ⏭  Already in database: "${data.name}"`);
@@ -833,7 +929,7 @@ async function runScraper(manualUrl = null, targetLimit = 100) {
       } catch (err) {
         console.error(`  ❌ Error on "${source.name}": ${err.message}`);
       }
-      await new Promise(r => setTimeout(r, 1000));
+      await new Promise(r => setTimeout(r, SOURCE_DELAY_MS));
     }
   }
 
@@ -877,4 +973,3 @@ if (require.main === module) {
 }
 
 module.exports = { runScraper, processSource };
-
