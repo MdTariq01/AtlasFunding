@@ -10,6 +10,7 @@
 require("dotenv").config();
 const https = require("https");
 const http = require("http");
+const mongoose = require("mongoose");
 const connectDB = require("../src/db/connection");
 const Scholarship = require("../src/models/Scholarship");
 
@@ -48,7 +49,11 @@ const DEFAULT_SOURCES = [
   { url: "https://newstrides.co/new/uk-delhi/", name: "NewStrides UK Grants" },
   { url: "https://education.gov.in/scholarships", name: "Ministry of Education India" },
   { url: "https://www.tatatrusts.org/our-work/individual-grants-programme/education-grants", name: "Tata Trusts Grants" },
-  { url: "https://www.scholarships.net.in/", name: "Scholarships Net India" }
+  { url: "https://www.scholarships.net.in/", name: "Scholarships Net India" },
+  { url: "https://grad.ncsu.edu/student-funding/fellowships-and-grants/national/nationally-competitive-graduate-fellowships/", name: "NC State Graduate Fellowships" },
+  { url: "https://www.pathwaystoscience.org/grad.aspx", name: "Pathways to Science STEM" },
+  { url: "https://www.daad.in/en/find-funding/scholarship-database/", name: "DAAD Germany India Database" },
+  { url: "https://www.chevening.org/scholarships/", name: "Chevening UK Fellowships" }
 ];
 
 // ── 75+ Categorized Search Queries covering fields, states & degrees ──────────
@@ -352,9 +357,9 @@ function sanitizeScholarshipData(raw) {
   return s;
 }
 
-const EXTRACTION_PROMPT = `You are a data extraction engine for an Indian student scholarship database. Given raw markdown scraped from a page, extract the scholarship and return ONLY a valid JSON object — no preamble, no markdown fences.
+const EXTRACTION_PROMPT = `You are a data extraction engine for a student scholarship database. Given raw markdown scraped from a page (which may contain one or multiple scholarships/grants), extract ALL active scholarships and return ONLY a valid JSON object — no preamble, no markdown fences.
 
-If the page does not describe an actual scholarship/grant/funding opportunity (nav page, index,404, article, unrelated), return: {"valid": false}
+If the page does not describe any actual scholarship/grant/funding opportunity (nav page, index, 404, article, generic chat/forum discussion without lists, etc.), return: {"valid": false}
 
 Otherwise use EXACTLY these enum values:
 - education_level: "school" | "diploma" | "undergrad" | "postgrad" | "doctorate" | "any"
@@ -362,42 +367,49 @@ Otherwise use EXACTLY these enum values:
 - study_location: "India" | "Abroad" | "Both"
 - provider_type: "government" | "corporate" | "ngo" | "university" | "international"
 
-Return exactly:
+Return exactly this JSON format:
 {
   "valid": true,
-  "name": "Official scholarship name (required)",
-  "provider": "Organization providing it",
-  "amount_value": <number, as stated on page>,
-  "amount_currency": "INR" | "USD" | "GBP" | "...",
-  "amount_string": "₹50,000 per year",
-  "cover_type": "partial",
-  "cover_details": "What costs are covered, or null",
-  "education_level": "undergrad",
-  "field_of_study": ["Engineering", "Science"],
-  "country": "India",
-  "study_location": "India",
-  "max_income_annual": <number, or null>,
-  "min_gpa": <number, or null>,
-  "requires_disability": false,
-  "citizenship": "Indian",
-  "min_work_experience": <number, default 0 if not mentioned — never null>,
-  "required_gender": "Any",
-  "deadline": "YYYY-MM-DD or null",
-  "application_url": "https://... or null",
-  "official_source_url": "the exact official application/provider URL chosen from the Outbound Links list, or null",
-  "required_documents": ["Marksheets", "Income Certificate"],
-  "application_effort_hours": <number, or null>,
-  "provider_type": "government",
-  "awards_per_year": null,
-  "notes": "Any extra info, or null"
+  "scholarships": [
+    {
+      "name": "Official scholarship name (required)",
+      "provider": "Organization providing it",
+      "amount_value": <number, per student value as stated on page>,
+      "amount_currency": "INR" | "USD" | "GBP" | "...",
+      "amount_string": "₹50,000 per year",
+      "cover_type": "partial",
+      "cover_details": "What costs are covered, or null",
+      "education_level": "undergrad",
+      "field_of_study": ["Engineering", "Science"],
+      "country": "India",
+      "study_location": "India",
+      "max_income_annual": <number, or null>,
+      "min_gpa": <number, or null>,
+      "requires_disability": false,
+      "citizenship": "Indian",
+      "min_work_experience": <number, default 0 if not mentioned — never null>,
+      "required_gender": "Any",
+      "deadline": "YYYY-MM-DD or null",
+      "application_url": "https://... or null",
+      "official_source_url": "the exact official application/provider URL chosen from the Outbound Links list, or null",
+      "required_documents": ["Marksheets", "Income Certificate"],
+      "application_effort_hours": <number, or null>,
+      "provider_type": "government",
+      "awards_per_year": null,
+      "notes": "Any extra info, or null"
+    }
+  ]
 }
 
 Rules:
+- Extract all valid, distinct scholarships listed on the page. Do not include expired/inactive items unless active dates are mentioned.
 - Never invent data. Use null when a field isn't stated on the page.
 - official_source_url: if one of the provided Outbound Links is clearly the scholarship's official application page or the provider's official site (matching the provider name), set it to that EXACT URL. If none match, set null. NEVER invent a URL that isn't in the provided list.
 - If work experience isn't mentioned, default min_work_experience to 0, not null.
 - Dates must be YYYY-MM-DD; if only month/year given, use the 1st of that month.
 - Do NOT convert currencies — keep amount_value and amount_currency as the page states them.
+- Discard/null any application urls or official source urls that point to social forums or general sharing sites (like reddit.com, facebook.com, youtube.com, x.com, linkedin.com, imgur.com), as these are social pointers, not official applications.
+- For incomplete, truncated words, or messy typos from copy-pasted posts, resolve and clean them up automatically to form correct english statements.
 - Return ONLY the JSON object.`;
 
 // Fields that tend to sit BELOW a scholarship's description/story on Indian
@@ -528,11 +540,20 @@ async function extractWithGroq(text, officialLinks = []) {
   }
 
   // Early-exit gate: page isn't actually a scholarship → caller skips it.
-  if (parsed.valid === false) return null;
+  if (parsed.valid === false || !Array.isArray(parsed.scholarships) || parsed.scholarships.length === 0) return null;
 
-  // Pass the link list along so the sanity check can tie the picked URL back to
-  // the provider name (which isn't known until after this extraction).
-  return sanitizeScholarshipData(parsed, officialLinks);
+  const sanitizedList = parsed.scholarships
+    .map(item => {
+      try {
+        return sanitizeScholarshipData(item);
+      } catch (err) {
+        console.warn(`  ⚠️ Failed to sanitize extracted scholarship "${item?.name}": ${err.message}`);
+        return null;
+      }
+    })
+    .filter(Boolean);
+
+  return sanitizedList.length > 0 ? sanitizedList : null;
 }
 
 function firecrawlScrape(url) {
@@ -863,33 +884,39 @@ async function processSource(source) {
   // sources, but only official links survive as application_url.
   const links = extractOutboundLinks(markdown, hostnameOf(source.url));
 
-  const data = await extractWithGroq(markdown, links);
-  if (!data) {
+  const dataList = await extractWithGroq(markdown, links);
+  if (!dataList || dataList.length === 0) {
     console.log(`  ⏭  No valid scholarship on page — skipping.`);
     return false;
   }
-  data.application_url = sanitizeExternalUrl(data.application_url);
-  data.source_url      = sanitizeExternalUrl(source.url);
-  // Raw page the record was mined from — used ONLY for dedup. Kept even when the
-  // displayed source_url is nulled (aggregator), else the same page re-ingests
-  // every run.
-  data.scraped_from_url = source.url;
-  data.verified        = true;
 
-  const existing = await Scholarship.findOne({
-    $or: [{ name: data.name }, { scraped_from_url: source.url }]
-  });
-  if (existing) {
-    console.log(`  ⏭  Already in database: "${data.name}"`);
-    return false;
+  let addedAny = false;
+  for (const data of dataList) {
+    data.application_url = sanitizeExternalUrl(data.application_url);
+    data.source_url      = sanitizeExternalUrl(source.url);
+    data.scraped_from_url = source.url;
+    data.verified        = true;
+
+    // Check if name already exists in database (names are unique indexed)
+    const existing = await Scholarship.findOne({ name: data.name });
+    if (existing) {
+      console.log(`  ⏭  Already in database: "${data.name}"`);
+      continue;
+    }
+
+    try {
+      await Scholarship.create(data);
+      console.log(`  ✅ Added: "${data.name}" (${data.amount_string || "amount TBD"}, ${data.education_level}, ${data.study_location})`);
+      addedAny = true;
+    } catch (err) {
+      console.error(`  ❌ Error saving "${data.name}":`, err.message);
+    }
   }
 
-  await Scholarship.create(data);
-  console.log(`  ✅ Added: "${data.name}" (${data.amount_string || "amount TBD"}, ${data.education_level}, ${data.study_location})`);
-  return true;
+  return addedAny;
 }
 
-async function runScraper(manualUrl = null, targetLimit = 100) {
+async function runScraper(manualUrl = null, targetLimit = 100, noSearch = false) {
   await connectDB();
   console.log("\n🕷️  AtlasFunding — Scholarship Scraping Pipeline\n" + "─".repeat(52));
 
@@ -906,15 +933,17 @@ async function runScraper(manualUrl = null, targetLimit = 100) {
     }
   } else {
     // Free crawl first (no credits). Firecrawl search augments coverage only if
-    // a key is present — treated as a reserve, not the primary discovery path.
+    // a key is present and search is not disabled.
     const crawled = await discoverViaCrawl(targetLimit);
     let discovered = [...crawled];
-    if (FIRECRAWL_KEY) {
+    if (FIRECRAWL_KEY && !noSearch) {
       const searched = await discoverNewScholarshipSites(targetLimit);
       const seen = new Set(crawled.map(s => s.url));
       for (const s of searched) {
         if (!seen.has(s.url)) { seen.add(s.url); discovered.push(s); }
       }
+    } else if (noSearch) {
+      console.log("🚫 Skipping Firecrawl search queries to save API credits (free Jina crawl only).");
     }
     // Cap total sources processed to --limit (defaults always run first, then as
     // many discovered pages as fit). Previously the limit only narrowed discovery
@@ -963,11 +992,21 @@ if (require.main === module) {
   // Accept --limit 30, --limit=30, and the commonly-typed --limit30 so the cap
   // actually applies (a silent miss would run an unthrottled full pass).
   const targetLimit = parseLimitArg(process.argv);
+  
+  const noSearch = process.argv.includes("--no-search") || process.argv.includes("--free");
 
-  runScraper(manualUrl, targetLimit)
-    .then(() => process.exit(0))
-    .catch(err => {
+  runScraper(manualUrl, targetLimit, noSearch)
+    .then(async () => {
+      try {
+        await mongoose.disconnect();
+      } catch (e) {}
+      process.exit(0);
+    })
+    .catch(async err => {
       console.error("Scraper crashed:", err);
+      try {
+        await mongoose.disconnect();
+      } catch (e) {}
       process.exit(1);
     });
 }

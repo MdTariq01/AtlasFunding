@@ -1,0 +1,48 @@
+name: Daily Free Scraper
+
+on:
+  schedule:
+    - cron: "30 18 * * *" # Runs everyday at midnight IST (18:30 UTC)
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Number of pages to discover & scrape (e.g. 50, 100)"
+        required: false
+        default: "50"
+
+jobs:
+  scrape-free:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Free Scraper (Credit-Safe)
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          JINA_API_KEY: ${{ secrets.JINA_API_KEY }}
+          FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
+          API_URL: ${{ vars.API_BASE_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          LIMIT="${{ github.event.inputs.limit || '50' }}"
+          if [ -n "$MONGODB_URI" ] && [ -n "$GROQ_API_KEY" ]; then
+            echo "🚀 Running credit-safe free scraper directly inside GitHub Actions..."
+            node scripts/scrape.js --free --limit "$LIMIT"
+          else
+            echo "📡 Triggering scraper on Render server..."
+            URL="${API_URL:-https://atlasfunding.onrender.com}"
+            curl -fsS -X POST \
+              -H "Content-Type: application/json" \
+              -H "x-cron-secret: ${CRON_SECRET}" \
+              "${URL}/api/cron/trigger?job=scraper"
+          fi
