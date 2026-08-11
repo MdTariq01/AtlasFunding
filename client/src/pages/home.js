@@ -1,5 +1,6 @@
 import { navigate } from "../main.js";
-import { isLoggedIn } from "../api.js";
+import { api, isLoggedIn } from "../api.js";
+
 
 export async function renderHome(el) {
   el.innerHTML = `
@@ -58,11 +59,11 @@ export async function renderHome(el) {
     <div style="border-bottom: 1px solid var(--border-light);">
       <div class="container flex" style="gap: 16px; padding: 24px;">
         <div class="card" style="padding: 16px 24px; border-radius: 6px;">
-          <div style="font-weight: 800; font-size: 1.25rem; color: var(--primary);">25</div>
+          <div id="home-opportunities-stats" style="font-weight: 800; font-size: 1.25rem; color: var(--primary);">25</div>
           <div style="font-size: 0.65rem; font-weight: 700; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.05em; margin-top: 4px;">OPPORTUNITIES LIVE</div>
         </div>
         <div class="card" style="padding: 16px 24px; border-radius: 6px;">
-          <div style="font-weight: 800; font-size: 1.25rem; color: var(--primary);">₹6.58 crore</div>
+          <div id="home-value-stats" style="font-weight: 800; font-size: 1.25rem; color: var(--primary);">₹6.58 crore</div>
           <div style="font-size: 0.65rem; font-weight: 700; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.05em; margin-top: 4px;">REPOSITORY VALUE</div>
         </div>
         <div class="card" style="padding: 16px 24px; border-radius: 6px;">
@@ -134,4 +135,22 @@ export async function renderHome(el) {
     navigate(isLoggedIn() ? "/calculator" : "/auth?next=calculator")
   );
   document.getElementById("home-browse")?.addEventListener("click", () => navigate("/repository"));
+
+  // Fetch real stats to sync landing page counts
+  api.repository.list({ limit: 1 })
+    .then(data => {
+      if (data && data.stats) {
+        const oppsEl = document.getElementById("home-opportunities-stats");
+        const valEl = document.getElementById("home-value-stats");
+        if (oppsEl && data.stats.total_opportunities !== undefined) {
+          oppsEl.textContent = data.stats.total_opportunities;
+        }
+        if (valEl && data.stats.total_award_value_crore !== undefined) {
+          valEl.textContent = `₹${data.stats.total_award_value_crore} crore`;
+        }
+      }
+    })
+    .catch(err => {
+      console.error("Failed to load repository stats for home page:", err);
+    });
 }
